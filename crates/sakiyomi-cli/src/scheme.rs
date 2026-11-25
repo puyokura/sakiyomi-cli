@@ -31,6 +31,7 @@
 pub const SCHEME: &str = "app.sakiyomi.mobile";
 
 /// Environment override for the Windows registry root.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENV_SCHEME_ROOT: &str = "SAKIYOMI_SCHEME_ROOT";
 /// Environment override for the Linux applications directory.
 /// Linux-only: unused on Windows by design, not dead.
@@ -44,6 +45,8 @@ const ENV_XDG_MIME: &str = "SAKIYOMI_XDG_MIME";
 const ENV_DESKTOP_DATABASE: &str = "SAKIYOMI_DESKTOP_DATABASE";
 
 /// Relay target recorded at registration time, if any.
+/// Both the Windows registry command and the Linux desktop entry embed it.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn relay_target() -> Option<String> {
     env_override("SAKIYOMI_RELAY")
 }
@@ -203,12 +206,15 @@ fn linux_register() -> Result<String, String> {
          Type=Application\n\
          Name=sakiyomi OAuth callback\n\
          Comment=Receives the app.sakiyomi.mobile OAuth redirect for the sakiyomi CLI\n\
-         Exec={} auth callback %u\n\
+         Exec={} auth callback %u{}\n\
          Terminal=true\n\
          NoDisplay=true\n\
          MimeType=x-scheme-handler/{};\n\
          Categories=Utility;\n",
         exe.display(),
+        relay_target()
+            .map(|r| format!(" --relay \"{}\"", r))
+            .unwrap_or_default(),
         SCHEME
     );
 
