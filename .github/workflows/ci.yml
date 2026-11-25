@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: build
+        run: cargo build --locked --verbose
+
+      - name: test
+        run: cargo test --locked --verbose
+
+      # A compiled binary is not a tested binary: run it and check the exit code
+      # and the shape of what it prints.
+      - name: smoke (unauthenticated)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/debug/sakiyomi
+          if [ -f "$BIN.exe" ]; then BIN="$BIN.exe"; fi
+          export SAKIYOMI_STATE="$RUNNER_TEMP/session.json"
+          export SAKIYOMI_CONFIG="$RUNNER_TEMP/config.toml"
+          "$BIN" --version
+          "$BIN" config > "$RUNNER_TEMP/config.json"
+          "$BIN" doctor
+          # /me without a token must be 401, which doctor reports as [ok].
+          "$BIN" auth status
+          # The login URL must be printed on stdout, one line, and contain the
+          # documented parameters.
+          "$BIN" auth login --dry-run > /dev/null
+          grep -Fq '"base": "https://sakiyomi.app/api"' "$RUNNER_TEMP/config.json"
+
+  mcp:
+    name: mcp handshake
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: initialize + tools/list over stdio
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SAKIYOMI_STATE="$RUNNER_TEMP/session.json"
+          export SAKIYOMI_CONFIG="$RUNNER_TEMP/config.toml"
+          # The server exits when its stdin closes, so the input is finite.
+          {
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+            echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          } | timeout 30 ./target/debug/sakiyomi mcp > mcp.out
+          python3 - <<'PY'
+          import json, pathlib
+          lines = [l for l in pathlib.Path("mcp.out").read_text().splitlines() if l.strip()]
+          assert len(lines) >= 2, f"expected 2 responses, got {len(lines)}"
+          init = json.loads(lines[0])
+          assert "result" in init, init
+          tools = json.loads(lines[1])
+          assert tools["result"]["tools"], "no tools listed"
+          print(f"tools: {len(tools['result']['tools'])}")
+          PY

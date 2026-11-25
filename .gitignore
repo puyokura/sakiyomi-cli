@@ -1,0 +1,23 @@
+# 検体・解析成果物・作業ディレクトリは履歴に入れない
+/apk/
+/decode/
+/jadx/
+/analysis/
+/work/
+/tmp/
+/target/
+
+# 資格情報・状態ファイル
+*.token
+config.toml
+.sakiyomi.local*
+
+# エディタ・OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 作業環境の仕様書・一時メモは公開しない
+/AGENTS.md
+/tmp_sites.txt

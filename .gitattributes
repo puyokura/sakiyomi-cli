@@ -1,0 +1,9 @@
+# Keep LF for everything that runs on Linux/CI. A CRLF shell script written by
+# `shell: bash` fails on the stray carriage returns, so these must stay LF.
+* text=auto eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf

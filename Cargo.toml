@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/sakiyomi-cli"]
+# Scratch prototypes under tmp/ are not part of the shipped workspace.
+exclude = ["tmp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Unofficial headless client for the saKIYOMI mobile API, reconstructed from the shipped Android bundle"
+
+[workspace.dependencies]
+sakiyomi-cli = { path = "crates/sakiyomi-cli" }
+
+ureq = { version = "3", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+unicode-width = "0.2"
+sha2 = "0.11"
+base64 = "0.23"
+getrandom = "0.4"
+
+[profile.release]
+strip = true
+lto = "thin"
