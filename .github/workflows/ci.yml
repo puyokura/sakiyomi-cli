@@ -50,14 +50,22 @@ jobs:
           export SAKIYOMI_STATE="$RUNNER_TEMP/session.json"
           export SAKIYOMI_CONFIG="$RUNNER_TEMP/config.toml"
           "$BIN" --version
-          "$BIN" config > "$RUNNER_TEMP/config.json"
+
+          # `doctor` probes /config and asserts that /me without a token is 401
+          # (it reports "verdict: ready" and exits 0 only when that holds).
           "$BIN" doctor
-          # /me without a token must be 401, which doctor reports as [ok].
-          "$BIN" auth status
-          # The login URL must be printed on stdout, one line, and contain the
-          # documented parameters.
-          "$BIN" auth login --dry-run > /dev/null
-          grep -Fq '"base": "https://sakiyomi.app/api"' "$RUNNER_TEMP/config.json"
+
+          "$BIN" config > "$RUNNER_TEMP/config.json"
+          grep -Fq '"social_open"' "$RUNNER_TEMP/config.json"
+
+          # The session path and base come from this command; it must work with
+          # no session at all.
+          "$BIN" auth status > "$RUNNER_TEMP/status.json"
+          grep -Fq '"base": "https://sakiyomi.app/api"' "$RUNNER_TEMP/status.json"
+          grep -Fq '"token_present": false' "$RUNNER_TEMP/status.json"
+
+          # --dry-run must not print a URL (nothing is opened) and must not fail.
+          "$BIN" auth login --dry-run
 
   mcp:
     name: mcp handshake
