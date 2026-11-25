@@ -56,6 +56,21 @@
   プロキシ設定を無視して 443 へ直接接続し、mitmproxy には 1 件も来なかった。むしろ
   プロキシを設定するとアプリの通信が壊れた（`通信できません`）。
 
+- **デイリーボーナス / 広告 / ミニゲーム / クイズ（実測）**。
+  `POST /missions/{id}/claim` はヘッドレスで通り、`claim 1` 相当が
+  `{"ok":true,"reward_coins":100,...}` を返すことを確認（受取済みなら 409）。
+  `GET /ads/reward` は状態を返すだけで、付与は AdMob の SSV が行う
+  （バンドル 456403-456413 で `serverSideVerificationOptions` を渡している）。
+  `nonce` / `win_event` / `mg_play` を付けても `used_today` は 0 のまま残高も動かず、
+  `POST /ads/reward` は 404。**広告コインはヘッドレスで取れない。**
+  `POST /minigame/wave/start` は `rules_version` を数値で送る必要があり（文字列は 409）、
+  レベルから計算したタップ列で `cleared: true` と `reward: {kind: free, coins: 20}`
+  を得た。台帳にも `reason=minigame / detail=波よみジャンプ (クリア) / delta=20` が記録された。
+  同日 2 回目のクリアは `reward: null`（`free_coins` は 1 日 1 回）。
+  `POST /quizzes` は 2 つの経路（生 HTTP と CLI）で 200
+  `{"ok":true,"quiz_adopt_bonus":1000}`。**削除・編集 API は無い**（`DELETE /quizzes/{id}` と
+  その POST はいずれも 404）。
+
 ## 3. 金銭操作の安全弁（実測）
 
 `--dry-run` はネットワーク I/O をしない。閉じたポートを base にしても exit 0 で送信内容を表示する。
@@ -103,7 +118,7 @@ exit=0
   実測では 44775 / 44909 / 6663 / 25142 / 1 のすべてが 404。**引数の正体は不明。**
 - **サーバー側の認可**。他人の position を sell できるか等は未検証。
 - **レート制限**。
-- **`/minigame/wave/*` の `rules_version`** 実値。定数モジュールから来ており復元できない。
+- **`/minigame/wave/*` の `rules_version`** の実値は定数モジュールから復元できなかった。実測では 1 と 2 が通り、3 は 409 で拒否される。既定は 2。
 - **`/transfers`** は `transfer_enabled=false` のため実測不能。
 
 ## 5. 実装がバンドルと意図的に違う点

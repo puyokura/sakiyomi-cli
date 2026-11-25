@@ -224,6 +224,117 @@ sakiyomi block <user_id> --off     # ブロックを解除する（DELETE）
 
 `--dry-run` で送信メソッドを確認できる。既定の確認プロンプトは金銭操作と同じ。
 
+## コインを増やす
+
+デイリーボーナス、広告のコイン、ミニゲームのコイン、クイズの作成。どれも
+ヘッドレスで動くかどうかを実測で分けた上で、動くものだけを実装している。
+
+```bash
+sakiyomi bonus status                    # 今日なにが受け取れるか（読み取り）
+sakiyomi wave status                     # 同じ内容をゲーム側から
+sakiyomi wave play --yes                 # 1 回プレイして、クリア分を受け取る
+sakiyomi quiz --title "..." --option A --option B \
+              --prob 60 --prob 40 --closes-at 2026-11-27T00:00:00.000Z --yes
+sakiyomi missions list                   # 未受取のミッションを探す
+sakiyomi claim <mission_id>              # ミッション報酬を受け取る
+```
+
+`bonus status` が出すもの（実測値）:
+
+```
+{
+  "reward_coins": 10,          // 広告 1 本あたり
+  "daily_limit": 5,            // 1 日の本数
+  "used_today": 0,
+  "remaining": 5,
+  "login_bonus_coins": 30,
+  "login_bonus": { "day": "2026-11-26", "available": true, "received": false },
+  "minigame_bonus_coins": 10,
+  "free_coins": 20             // ミニゲームのクリア分（wave play 側）
+}
+```
+
+### デイリーボーナス
+
+`login_bonus.available` が `true` の日は、missions の id 1
+（ログインボーナス）を `claim` で受け取れる。受け取り済みなら
+`409 このミッションは達成済みです` が返る。
+
+```bash
+sakiyomi missions list | grep -A1 '"kind": "login"'   # claimable を見る
+sakiyomi claim 1 --yes
+```
+
+### 広告のコイン
+
+**ヘッドレスでは取れない。** 実装していないし、実装もできない。
+
+理由は `GET /ads/reward` の形にある。この経路は状態を返すだけで、付与は
+AdMob のサーバー側検証（SSV）コールバックが行う。アプリは
+`RewardedAd.createForAdRequest` に `serverSideVerificationOptions` を渡して
+`customData` を載せ、広告網からサーバーへ直接通知させる（バンドル 456403-456413）。
+CLI から出せるのは nonce を付けた GET だけで、それでは付与されない。
+
+実測で確かめた。`nonce` / `win_event` / `mg_play` を付けて何度叩いても
+`used_today` は 0 のまま、コイン残高も動かない。`POST /ads/reward` は 404。
+
+したがって `bonus status` は「今いくらもらえるか」を読むだけのコマンドで、
+受け取りはしない。アプリで広告を再生する必要がある。
+
+### ミニゲームのコイン
+
+**ヘッドレスで取れる。** 実装した。
+
+サーバーはタップ時刻の列を受け取り、自分の持つレベルで再生して結果を決める。
+だから画面を作る必要はなく、レベルからタップ列を計算すれば足りる。
+`wave play` はそれをやる。
+
+```bash
+$ sakiyomi wave play --yes
+round 11364: 8 taps, waiting 7s so the replay sees them in the past
+ok: {
+  "cleared": true,
+  "best_row": 8,
+  "falls": 0,
+  "reward": { "kind": "free", "coins": 20 },
+  ...
+}
+```
+
+3 つの実測済みの落とし穴がある。
+
+- **`rules_version` は数値で送る。** 文字列にすると
+  `409 アプリを最新の版にしてから遊んでください` になる。1 と 2 が通り、3 は未公開として拒否される。
+- **タップ時刻が未来だとクリアにならない。** 再生は「まだ来ていない時刻のタップ」を
+  ミスとして扱う。`start` の直後に `finish` を送ると `best_row: 8` なのに
+  `cleared: false` になる。最後のタップが過ぎるまで待つ必要があり、`wave play` は
+  自動で待つ（`--wait` で上書きできる）。
+- **同じ日に 2 回クリアしても 2 回目は無報酬。** `free_coins` は 1 日 1 回。
+  `today.free_done` が `true` なら、もう受け取り済み。
+
+タップ列の計算は `crates/sakiyomi-cli/src/wave.rs`。レベルは
+`island x0 / width / period / speed / dir` だけなので、位置は
+`((x0+PAD+dir·speed·t/1000) mod period) − PAD` で決まる。定数はすべてバンドルから
+取り出してあり、モジュールの表に根拠の行番号を書いてある。
+
+### クイズの作成
+
+**ヘッドレスで作れる。** 実装した。ただし採択されるとポイントが動く。
+
+```bash
+sakiyomi quiz --title "波よみクイズ" \
+              --option "上がる" --option "下がる" \
+              --prob 60 --prob 40 \
+              --closes-at 2026-11-27T00:00:00.000Z \
+              --dry-run     # まず確認
+```
+
+`--prob` は省略できる（その場合 `prob` は null で送られ、確率未設定として扱われる）。
+`--option` は 2 つ以上。採択時に `quiz_adopt_bonus`（実測 1000）が入る。
+
+**取り消しはできない。** `DELETE /quizzes/{id}` も編集 API も無い（実測で 404）。
+作ったものは審査に回り、却下されるまで残る。`--dry-run` で中身を確認してから送ること。
+
 ## 金銭が動く操作
 
 **ここは読んでから使う。**
@@ -331,15 +442,17 @@ state          <- env
 sakiyomi mcp
 ```
 
-stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 14 個:
+stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 18 個:
 
 ```
 doctor, config, me, events_list, event_history, live_board,
-positions, missions, ledger, rankings, notices,
+positions, missions, ledger, rankings, notices, quizzes_mine,
+bonus_status, wave_play, quiz_create,
 buy, sell, claim
 ```
 
-金銭系の 3 つは `confirm: true` が必須。付けなければエラーになり、`dry_run: true` なら送信内容だけ返す。
+状態やポイントが動く 5 つ（`buy` / `sell` / `claim` / `wave_play` / `quiz_create`）は
+`confirm: true` が必須。付けなければエラーになり、`dry_run: true` なら送信内容だけ返す。
 
 ```json
 {"name": "buy", "arguments": {"event": "44909", "option": "111516", "stake": 100, "confirm": true, "dry_run": true}}

@@ -15,6 +15,7 @@ mod mcp;
 mod output;
 mod session;
 mod transport;
+mod wave;
 mod wire;
 
 use std::io::IsTerminal;
@@ -42,6 +43,8 @@ mod code {
     pub const DECLINED: i32 = 3;
     /// Authentication is missing or no longer valid.
     pub const AUTH: i32 = 6;
+    /// The request definitely never reached the server; retrying is safe.
+    pub const NOT_SENT: i32 = 4;
 }
 
 fn main() {
@@ -87,6 +90,9 @@ fn run(cli: Cli) -> i32 {
         Command::Transfer(a) => cmd_transfer(a, &settings, &cli.global),
         Command::InviteClaim(a) => cmd_invite_claim(a, &settings, &cli.global),
         Command::GiftExchange(a) => cmd_gift_exchange(a, &settings, &cli.global),
+        Command::Bonus(c) => cmd_bonus(c, &settings, &cli.global),
+        Command::Wave(c) => cmd_wave(c, &settings, &cli.global),
+        Command::Quiz(a) => cmd_quiz(a, &settings, &cli.global),
     }
 }
 
@@ -472,6 +478,181 @@ fn state_action(
         return code::DECLINED;
     }
     perform(settings, g, &req).0
+}
+
+// ---- bonus / minigame / quiz ----------------------------------------------]
+
+/// `bonus status`: read the ad and bonus offer the app shows on the missions
+/// screen. `GET /ads/reward` also reports whether the daily login bonus is still
+/// available, which is why it doubles as the status view for `bonus`.
+fn cmd_bonus(c: cli::BonusCmd, settings: &Settings, g: &cli::Global) -> i32 {
+    match c {
+        cli::BonusCmd::Status(a) => read(settings, g, |api| api.ads_reward("", "", &a.mg_play)),
+    }
+}
+
+/// `wave status`: the same offer, without a play id.
+fn cmd_wave(c: cli::WaveCmd, settings: &Settings, g: &cli::Global) -> i32 {
+    match c {
+        cli::WaveCmd::Status => read(settings, g, |api| api.ads_reward("", "", "")),
+        cli::WaveCmd::Play(a) => cmd_wave_play(a, settings, g),
+    }
+}
+
+/// `wave play`: one round, start to finish, without a screen.
+///
+/// The order matters and is not cosmetic:
+///
+/// 1. `start` returns the level and a `play_id`. The level is the only input.
+/// 2. The tap list is computed locally from that level (see [`wave`]).
+/// 3. The server replays the list when `finish` arrives, and treats a tap whose
+///    time has not yet passed as a miss. So the finish call waits until the last
+///    tap is in the past; `--wait` overrides the computed value.
+///
+/// Skipping step 3 was measured to produce `cleared: false` with `best_row: 8`
+/// — it looks like a solver bug but is the server refusing to rewind the clock.
+fn cmd_wave_play(a: cli::WavePlayArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    let session = match load_session(settings) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let transport = make_transport(settings, g, &session);
+
+    let start = {
+        let api = Api::new(settings.app_version.clone());
+        api.minigame_start(a.rules_version)
+    };
+    if g.dry_run {
+        print!(
+            "{}",
+            guard::describe(&start, transport.base(), session.token())
+        );
+        eprintln!("dry-run: nothing was sent");
+        return code::OK;
+    }
+    if !has_any_token(settings, g, &session) {
+        eprintln!(
+            "error: this action needs a session. Pass --token or run `sakiyomi auth import-token`."
+        );
+        return code::AUTH;
+    }
+
+    let started = match transport.send(&start) {
+        Ok(r) if (200..300).contains(&r.status) => r,
+        Ok(r) => {
+            eprintln!(
+                "error: POST /minigame/wave/start returned HTTP {}",
+                r.status
+            );
+            let msg = crate::output::to_json(&r.body);
+            eprintln!("{}", msg);
+            return code::FAILED;
+        }
+        Err(e) => {
+            eprintln!("error: could not start a round: {}", e);
+            return code::NOT_SENT;
+        }
+    };
+
+    let play_id = match started.body.get("play_id").and_then(|v| v.as_u64()) {
+        Some(id) => id,
+        None => {
+            eprintln!("error: the start reply has no play_id");
+            return code::FAILED;
+        }
+    };
+
+    let level = match wave::Level::from_start(&started.body) {
+        Some(l) => l,
+        None => {
+            eprintln!("error: the start reply carries no usable level; refusing to invent one");
+            return code::FAILED;
+        }
+    };
+
+    let taps = match level.solve() {
+        Some(t) => t,
+        None => {
+            eprintln!("error: this level could not be solved; nothing was finished");
+            eprintln!("note: the round is left unfinished on the server, which pays nothing");
+            return code::FAILED;
+        }
+    };
+
+    let wait_secs = if a.wait > 0 {
+        a.wait
+    } else {
+        wave::Level::settle_ms(&taps).div_ceil(1000)
+    };
+    eprintln!(
+        "round {}: {} taps, waiting {}s so the replay sees them in the past",
+        play_id,
+        taps.len(),
+        wait_secs
+    );
+    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+
+    let finish = {
+        let api = Api::new(settings.app_version.clone());
+        api.minigame_finish(&play_id.to_string(), &taps)
+    };
+    let outcome = guard::MoneyGuard::new(&transport, finish, "finish one wave round").run();
+    let (rc, msg) = outcome.report();
+    println!("{}", msg);
+
+    rc
+}
+
+/// `quiz`: create one (POST /quizzes).
+///
+/// Options and their probabilities come in as repeated flags, so they are paired
+/// here rather than in the CLI layer: a probability without a matching option is
+/// a usage error, not something to guess at.
+fn cmd_quiz(a: cli::QuizArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if a.options.len() < 2 {
+        eprintln!("error: at least two --option values are required");
+        return code::USAGE;
+    }
+    if !a.probs.is_empty() && a.probs.len() != a.options.len() {
+        eprintln!(
+            "error: {} --prob values for {} --option values; give one per option or none",
+            a.probs.len(),
+            a.options.len()
+        );
+        return code::USAGE;
+    }
+    let options: Vec<(String, Option<u8>)> = a
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, label)| (label.clone(), a.probs.get(i).copied()))
+        .collect();
+    let draft = client::QuizDraft {
+        title: a.title.clone(),
+        description: a.description.clone(),
+        options,
+        closes_at: a.closes_at.clone(),
+        image_url: a.image_url.clone(),
+        news_url: a.news_url.clone(),
+        note: a.note.clone(),
+    };
+    let req = {
+        let api = Api::new(settings.app_version.clone());
+        api.create_quiz(&draft)
+    };
+    let detail = format!(
+        "create quiz {:?} with {} options, closing {}",
+        draft.title,
+        draft.options.len(),
+        draft.closes_at
+    );
+    money_action(
+        settings,
+        g,
+        req,
+        &format!("create quiz {:?}", draft.title),
+        &detail,
+    )
 }
 
 // ---- money ----------------------------------------------------------------

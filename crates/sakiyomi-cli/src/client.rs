@@ -109,6 +109,22 @@ pub struct Api {
     pub app_version: String,
 }
 
+/// The fields `POST /quizzes` takes (bundle 516118).
+///
+/// `prob` is `None` when the caller left it out, which the app sends as null
+/// rather than as zero: a zero would claim "no chance at all".
+#[derive(Debug, Clone, Default)]
+pub struct QuizDraft {
+    pub title: String,
+    pub description: String,
+    /// `(label, prob)` in the order the app renders them.
+    pub options: Vec<(String, Option<u8>)>,
+    pub closes_at: String,
+    pub image_url: Option<String>,
+    pub news_url: Option<String>,
+    pub note: String,
+}
+
 // The recovered surface is wider than the exposed CLI: builders listed here are
 // derived from the bundle and kept so the contract table stays executable even
 // when a subcommand does not use them yet.
@@ -384,10 +400,14 @@ impl Api {
     }
 
     /// `POST /minigame/wave/start {platform, app_version, rules_version}`
-    /// (bundle 502203-502213). `rules_version` comes from a constants module
-    /// whose value is not recoverable from the bundle, so it is a parameter
-    /// rather than an invented constant.
-    pub fn minigame_start(&self, rules_version: &str) -> WireRequest {
+    /// (bundle 502203-502213).
+    ///
+    /// `rules_version` is a **number** in the bundle (`WAVE_RULES_VERSION` is read
+    /// out of a constants module at 502208), and the server validates it against
+    /// the current rule set: sending it as a string was measured to be rejected
+    /// with 409 「アプリを最新の版にしてから遊んでください」. Values 1 and 2 are
+    /// accepted today; 3 and above are refused as "not released yet".
+    pub fn minigame_start(&self, rules_version: u32) -> WireRequest {
         WireRequest::post("/minigame/wave/start")
             .body(serde_json::json!({
                 "platform": "android",
@@ -399,11 +419,56 @@ impl Api {
     }
 
     /// `POST /minigame/wave/finish {play_id, taps}` (bundle 502220-502229).
-    pub fn minigame_finish(&self, play_id: &str, taps: u64) -> WireRequest {
+    ///
+    /// `taps` is the array of tap times in milliseconds, exactly as the app
+    /// reports them (501927-501947, 787938): the server replays the list, so
+    /// sending a count instead of the times is a different request entirely.
+    pub fn minigame_finish(&self, play_id: &str, taps: &[u64]) -> WireRequest {
         WireRequest::post("/minigame/wave/finish")
             .body(serde_json::json!({ "play_id": play_id, "taps": taps }))
             .timeout_ms(20_000)
             .money()
+    }
+
+    /// `POST /quizzes {title, description, options, image_url, closes_at,
+    /// news_url, note}` (bundle 516118-516208). Labels, descriptions and notes
+    /// are trimmed by the app (516120-516206); each option is
+    /// `{label, prob, image_url}` with `prob` parsed as a base-10 integer or
+    /// null when the field was left blank (516134-516164).
+    ///
+    /// Marks the request as money-moving: adoption pays `quiz_adopt_bonus`
+    /// points, and the app treats the same call as a state change.
+    pub fn create_quiz(&self, quiz: &QuizDraft) -> WireRequest {
+        let options: Vec<serde_json::Value> = quiz
+            .options
+            .iter()
+            .map(|(label, prob)| {
+                serde_json::json!({
+                    "label": label.trim(),
+                    "prob": prob,
+                    "image_url": quiz.image_url.as_deref().map(str::trim),
+                })
+            })
+            .collect();
+        let closes = quiz.closes_at.trim();
+        let note = quiz.note.trim();
+        WireRequest::post("/quizzes")
+            .body(serde_json::json!({
+                "title": quiz.title.trim(),
+                "description": quiz.description.trim(),
+                "options": options,
+                "image_url": quiz.image_url.as_deref().map(str::trim),
+                "closes_at": closes,
+                "news_url": quiz.news_url.as_deref().map(str::trim),
+                "note": if note.is_empty() { serde_json::Value::Null }
+                else { serde_json::Value::String(note.to_string()) },
+            }))
+            .money()
+    }
+
+    /// `GET /quizzes/mine` — the caller's own quizzes (bundle 495732).
+    pub fn quizzes_mine(&self) -> WireRequest {
+        WireRequest::get("/quizzes/mine")
     }
 
     // ---- profile / social toggles -----------------------------------------
@@ -696,8 +761,8 @@ mod tests {
             api.invite_claim("c"),
             api.gifts_exchange("b", serde_json::json!([])),
             api.result_request("e", serde_json::json!({})),
-            api.minigame_start("v"),
-            api.minigame_finish("p", 1),
+            api.minigame_start(2),
+            api.minigame_finish("p", &[1, 2]),
         ] {
             assert!(req.money, "{} must be flagged money", req.path);
         }
@@ -721,10 +786,13 @@ mod tests {
     }
 
     #[test]
-    fn minigame_start_requires_rules_version_explicitly() {
+    fn minigame_start_sends_a_numeric_rules_version() {
+        // A string was measured to be refused with 409: the server validates the
+        // value as a number, and the bundle reads it as one (502208).
         let api = Api::new("1.0.42");
-        let body = api.minigame_start("2026-11-01").body.unwrap();
-        assert_eq!(body["rules_version"], "2026-11-01");
+        let body = api.minigame_start(2).body.unwrap();
+        assert_eq!(body["rules_version"], 2);
+        assert!(body["rules_version"].is_number(), "must be numeric");
         assert_eq!(body["platform"], "android");
         assert_eq!(body["app_version"], "1.0.42");
     }

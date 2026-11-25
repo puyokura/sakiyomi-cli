@@ -344,6 +344,50 @@ fn tool_definitions() -> Vec<Value> {
                 "dry_run": {"type":"boolean","default":false}
             },"required":["mission","confirm"]}),
         ),
+        tool(
+            "bonus_status",
+            "What the ad and login bonuses offer right now (GET /ads/reward). Read-only.",
+            json!({"type":"object","properties":{
+                "mg_play": {"type":"string","default":"",
+                            "description":"A play id from wave_play, to report that round's video bonus."}
+            }}),
+        ),
+        tool(
+            "wave_play",
+            "Play one wave round headlessly and collect its coins (POST /minigame/wave/start then /finish). MOVES POINTS. Requires confirm=true.",
+            json!({"type":"object","properties":{
+                "rules_version": {"type":"integer","default":2,
+                                  "description":"1 or 2; the server refuses anything else with 409."},
+                "wait_secs": {"type":"integer",
+                              "description":"Seconds to wait before finishing. Defaults to when the last tap has passed."},
+                "confirm": {"type":"boolean","description":"Must be true."},
+                "dry_run": {"type":"boolean","default":false}
+            },"required":["confirm"]}),
+        ),
+        tool(
+            "quiz_create",
+            "Create a quiz (POST /quizzes). MOVES POINTS when it is adopted. Requires confirm=true.",
+            json!({"type":"object","properties":{
+                "title": {"type":"string"},
+                "description": {"type":"string","default":""},
+                "options": {"type":"array","items":{"type":"object","properties":{
+                    "label": {"type":"string"},
+                    "prob": {"type":"integer"}
+                },"required":["label"]},
+                    "description":"At least two."},
+                "closes_at": {"type":"string","description":"ISO 8601 UTC."},
+                "image_url": {"type":"string"},
+                "news_url": {"type":"string"},
+                "note": {"type":"string","default":""},
+                "confirm": {"type":"boolean"},
+                "dry_run": {"type":"boolean","default":false}
+            },"required":["title","options","closes_at","confirm"]}),
+        ),
+        tool(
+            "quizzes_mine",
+            "Your own quizzes (GET /quizzes/mine). Read-only.",
+            json!({"type":"object","properties":{}}),
+        ),
     ]
 }
 
@@ -430,6 +474,131 @@ fn call_tool(
             Ok(fetch(&transport, &api.rankings(period)))
         }
         "notices" => Ok(fetch(&transport, &api.notices())),
+
+        // ---- bonus / minigame / quiz ----------------------------------------
+        "bonus_status" => {
+            let mg_play = args.get("mg_play").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(fetch(&transport, &api.ads_reward("", "", mg_play)))
+        }
+        "wave_play" => {
+            require_confirm(args)?;
+            let rules = args
+                .get("rules_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2) as u32;
+            let start = api.minigame_start(rules);
+            if flag(args, "dry_run") {
+                return Ok(text_result(crate::guard::describe(
+                    &start,
+                    transport.base(),
+                    session.token(),
+                )));
+            }
+            let started = match transport.send(&start) {
+                Ok(r) if (200..300).contains(&r.status) => r,
+                Ok(r) => {
+                    return Ok(error_result(format!(
+                        "start failed: HTTP {}\n{}",
+                        r.status,
+                        crate::output::to_json(&r.body)
+                    )))
+                }
+                Err(e) => return Ok(error_result(format!("start failed: {}", e))),
+            };
+            let play_id = match started.body.get("play_id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => return Ok(error_result("the start reply has no play_id")),
+            };
+            let level = match crate::wave::Level::from_start(&started.body) {
+                Some(l) => l,
+                None => {
+                    return Ok(error_result(
+                        "the start reply carries no usable level; refusing to invent one",
+                    ))
+                }
+            };
+            let taps = match level.solve() {
+                Some(t) => t,
+                None => return Ok(error_result("this level could not be solved")),
+            };
+            // The replay treats taps still in the future as misses, so the finish
+            // has to wait until the last one is in the past.
+            let wait = args
+                .get("wait_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| crate::wave::Level::settle_ms(&taps).div_ceil(1000));
+            std::thread::sleep(std::time::Duration::from_secs(wait));
+            let finish = api.minigame_finish(&play_id.to_string(), &taps);
+            let (code, msg) = crate::guard::MoneyGuard::new(
+                &transport,
+                finish,
+                format!("finish wave round {}", play_id),
+            )
+            .run()
+            .report();
+            Ok(if code == 0 {
+                text_result(msg)
+            } else {
+                error_result(msg)
+            })
+        }
+        "quiz_create" => {
+            require_confirm(args)?;
+            let draft = crate::client::QuizDraft {
+                title: str_arg(args, "title")?,
+                description: args
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                options: args
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| {
+                                let label = o.get("label")?.as_str()?.to_string();
+                                let prob = o.get("prob").and_then(|p| p.as_u64()).map(|p| p as u8);
+                                Some((label, prob))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                closes_at: str_arg(args, "closes_at")?,
+                image_url: args
+                    .get("image_url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                news_url: args
+                    .get("news_url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                note: args
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            if draft.options.len() < 2 {
+                return Err(RpcError::bad_params(
+                    "quiz_create needs at least two options",
+                ));
+            }
+            let req = api.create_quiz(&draft);
+            let (code, msg) = crate::guard::MoneyGuard::new(
+                &transport,
+                req,
+                format!("create quiz {:?}", draft.title),
+            )
+            .run()
+            .report();
+            Ok(if code == 0 {
+                text_result(msg)
+            } else {
+                error_result(msg)
+            })
+        }
+        "quizzes_mine" => Ok(fetch(&transport, &api.quizzes_mine())),
 
         // ---- money ---------------------------------------------------------
         "buy" => {

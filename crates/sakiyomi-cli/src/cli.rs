@@ -155,12 +155,85 @@ pub enum Command {
 
     /// Block or unblock a user.
     Block(BlockArgs),
+
+    /// Daily login bonus and the extra coins offered for watching an ad.
+    #[command(subcommand)]
+    Bonus(BonusCmd),
+
+    /// The wave minigame: play it headlessly and collect its coins.
+    #[command(subcommand)]
+    Wave(WaveCmd),
+
+    /// Create a quiz (POST /quizzes). Points move only if it is adopted.
+    Quiz(QuizArgs),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum BlocksCmd {
     /// List blocked users (GET /blocks).
     List,
+}
+
+/// `bonus`: the two coin sources that sit beside missions.
+#[derive(Debug, Subcommand)]
+pub enum BonusCmd {
+    /// Show what is available right now (GET /ads/reward).
+    Status(BonusStatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BonusStatusArgs {
+    /// A play id from `wave play`, to ask about that run's video bonus.
+    #[arg(long, default_value = "")]
+    pub mg_play: String,
+}
+
+/// `wave`: the endless-runner whose coins are paid out on a clear.
+#[derive(Debug, Subcommand)]
+pub enum WaveCmd {
+    /// Play one round: start, simulate, finish after the taps are in the past.
+    Play(WavePlayArgs),
+    /// Show the per-day limits and what has been collected (GET /ads/reward).
+    Status,
+}
+
+#[derive(Debug, Args)]
+pub struct WavePlayArgs {
+    /// Round rules 1 or 2. The server refuses anything else with 409.
+    #[arg(long, default_value = "2")]
+    pub rules_version: u32,
+    /// Seconds to wait before finishing. The replay treats tap times that are
+    /// still in the future as a miss, so the wait must cover the last tap.
+    #[arg(long, default_value = "0")]
+    pub wait: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct QuizArgs {
+    /// Question title.
+    #[arg(long)]
+    pub title: String,
+    /// Optional description.
+    #[arg(long, default_value = "")]
+    pub description: String,
+    /// Answer label. Repeat for each option (at least two).
+    #[arg(long = "option", required = true)]
+    pub options: Vec<String>,
+    /// Confidence for the matching `--option`, as a percentage. Repeat.
+    #[arg(long = "prob")]
+    pub probs: Vec<u8>,
+    /// Closing time, ISO 8601 in UTC (for example 2026-11-27T00:00:00.000Z).
+    #[arg(long)]
+    pub closes_at: String,
+    /// Optional image URL.
+    #[arg(long)]
+    pub image_url: Option<String>,
+    /// Optional news URL.
+    #[arg(long)]
+    pub news_url: Option<String>,
+    /// Optional note shown with the quiz.
+    #[arg(long, default_value = "")]
+    pub note: String,
 }
 
 #[derive(Debug, Args)]
