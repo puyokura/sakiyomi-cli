@@ -269,14 +269,14 @@ fn cmd_auth(c: cli::AuthCmd, settings: &Settings, g: &cli::Global) -> i32 {
         }
         cli::AuthCmd::Login => flow::login(settings, g),
         cli::AuthCmd::Callback(args) => flow::callback(settings, &args.uri, args.relay.as_deref()),
-        cli::AuthCmd::Register => cmd_register(),
+        cli::AuthCmd::Register => cmd_register(settings),
         cli::AuthCmd::Unregister => cmd_unregister(),
         cli::AuthCmd::Logout(args) => cmd_logout(args, settings, g),
     }
 }
 
-fn cmd_register() -> i32 {
-    match scheme::register() {
+fn cmd_register(settings: &Settings) -> i32 {
+    match scheme::register(&settings.state_path) {
         Ok(msg) => {
             println!("{}", msg);
             code::OK

@@ -108,8 +108,8 @@ pub fn login(settings: &Settings, g: &crate::cli::Global) -> i32 {
 
     // Registration only matters on the machine that has the browser. A failure
     // here is normal on a server, so it is a note, not an error.
-    if !crate::scheme::is_registered() {
-        match crate::scheme::register() {
+    if !crate::scheme::is_registered(&settings.state_path) {
+        match crate::scheme::register(&settings.state_path) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!(

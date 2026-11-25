@@ -61,14 +61,14 @@ fn current_exe() -> Result<std::path::PathBuf, String> {
 }
 
 /// Whether our handler is currently registered.
-pub fn is_registered() -> bool {
+pub fn is_registered(state_path: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
-        windows_reg_query()
+        windows_reg_query(state_path)
     }
     #[cfg(not(windows))]
     {
-        linux_is_registered()
+        linux_is_registered(state_path)
     }
 }
 
@@ -77,21 +77,26 @@ pub fn is_registered() -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn windows_reg_query() -> bool {
+fn windows_reg_query(state_path: &std::path::Path) -> bool {
     let root =
         env_override(ENV_SCHEME_ROOT).unwrap_or_else(|| "HKCU\\Software\\Classes".to_string());
     let key = format!("{}\\{}", root, SCHEME);
-    match std::process::Command::new("reg")
-        .args(["query", &key, "/ve"])
+    // A stale registration (pointing at another --state) must not count: the
+    // callback would write its result where nobody is listening.
+    let command_key = format!("{}\\shell\\open\\command", key);
+    let out = match std::process::Command::new("reg")
+        .args(["query", &command_key, "/ve"])
         .output()
     {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
+        Ok(out) if out.status.success() => out,
+        _ => return false,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.contains(&state_path.display().to_string())
 }
 
 #[cfg(windows)]
-fn windows_register() -> Result<String, String> {
+fn windows_register(state_path: &std::path::Path) -> Result<String, String> {
     let root =
         env_override(ENV_SCHEME_ROOT).unwrap_or_else(|| "HKCU\\Software\\Classes".to_string());
     let exe = current_exe()?;
@@ -103,14 +108,18 @@ fn windows_register() -> Result<String, String> {
     // handler command therefore carries no relay argument, and the browser-side
     // machine reads `SAKIYOMI_RELAY` from its own user environment when it needs
     // to forward. To make that automatic, register with the argument below.
-    let command = match relay_target() {
-        Some(target) => format!(
-            "\"{}\" auth callback \"%1\" --relay \"{}\"",
-            exe.display(),
-            target
-        ),
-        None => format!("\"{}\" auth callback \"%1\"", exe.display()),
-    };
+    // `--state` must be baked in: the OS starts the handler with a fresh
+    // environment, so a SAKIYOMI_STATE set in the waiting shell is not visible
+    // there. Without it the callback writes its result somewhere else and the
+    // waiting process times out.
+    let mut command = format!(
+        "\"{}\" auth callback \"%1\" --state \"{}\"",
+        exe.display(),
+        state_path.display()
+    );
+    if let Some(target) = relay_target() {
+        command.push_str(&format!(" --relay \"{}\"", target));
+    }
 
     let run = |args: &[&str]| -> Result<(), String> {
         let out = std::process::Command::new("reg")
@@ -178,9 +187,14 @@ fn desktop_file_name() -> &'static str {
 }
 
 #[cfg(not(windows))]
-fn linux_is_registered() -> bool {
-    if desktop_file_path().exists() {
-        return true;
+fn linux_is_registered(state_path: &std::path::Path) -> bool {
+    let path = desktop_file_path();
+    if path.exists() {
+        // A stale entry (pointing at another --state) must not count.
+        return match std::fs::read_to_string(&path) {
+            Ok(text) => text.contains(&state_path.display().to_string()),
+            Err(_) => false,
+        };
     }
     // Fall back to asking the mime database, in case the file lives elsewhere.
     let xdg = env_override(ENV_XDG_MIME).unwrap_or_else(|| "xdg-mime".to_string());
@@ -194,28 +208,35 @@ fn linux_is_registered() -> bool {
 }
 
 #[cfg(not(windows))]
-fn linux_register() -> Result<String, String> {
+fn linux_register(state_path: &std::path::Path) -> Result<String, String> {
     let dir = linux_desktop_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
 
     let exe = current_exe()?;
     // %u carries the full URI. The quoting matters: the URI contains a colon
     // and a slash, and the scheme handler receives it verbatim.
+    // Same reason as the Windows registry: the OS launches the handler without
+    // the waiting shell's environment, so `--state` is baked into the entry.
+    let mut exec = format!(
+        "{} auth callback %u --state \"{}\"",
+        exe.display(),
+        state_path.display()
+    );
+    if let Some(target) = relay_target() {
+        exec.push_str(&format!(" --relay \"{}\"", target));
+    }
+
     let contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=sakiyomi OAuth callback\n\
          Comment=Receives the app.sakiyomi.mobile OAuth redirect for the sakiyomi CLI\n\
-         Exec={} auth callback %u{}\n\
+         Exec={}\n\
          Terminal=true\n\
          NoDisplay=true\n\
          MimeType=x-scheme-handler/{};\n\
          Categories=Utility;\n",
-        exe.display(),
-        relay_target()
-            .map(|r| format!(" --relay \"{}\"", r))
-            .unwrap_or_default(),
-        SCHEME
+        exec, SCHEME
     );
 
     let path = desktop_file_path();
@@ -281,14 +302,14 @@ fn linux_unregister() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// Register this binary as the `app.sakiyomi.mobile` handler.
-pub fn register() -> Result<String, String> {
+pub fn register(state_path: &std::path::Path) -> Result<String, String> {
     #[cfg(windows)]
     {
-        windows_register()
+        windows_register(state_path)
     }
     #[cfg(not(windows))]
     {
-        linux_register()
+        linux_register(state_path)
     }
 }
 
