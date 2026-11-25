@@ -42,128 +42,91 @@ verdict: ready
 
 ## ログイン
 
-サキヨミには**メール+パスワードのログインが無い**。アプリの最初の画面にあるのは
-「Appleで続ける」「Googleで続ける」の 2 つだけで、CLI もそれに合わせて Google でログインする。
+**この CLI は Google のログインを自分では行わない。** アプリ側で確立したトークンを取り込む。
+
+理由は仕様上の制約で、こちらの都合ではない。アプリの Google ログインは、認可コードを
+`app.sakiyomi.mobile:/oauthredirect` というカスタムスキームへ返す。Google はこの
+クライアントに対して、loopback も LAN IP も https も OOB も受け付けない（実測で 4 種とも拒否）。
+つまりデスクトップやサーバーのプロセスが認可コードを受け取る道が無い。だから試さない。
+
+トークンさえあれば後は同じ。API は `Authorization: Bearer <token>` を受けるだけなので、
+取り込み経路を 3 つ用意している。
+
+### 取り込む
 
 ```bash
-sakiyomi auth login
+sakiyomi auth import-token --token "$TOKEN"
 ```
 
-URL が 1 行で表示され、ブラウザが開く。Google の画面でログインすると、このコマンドは
-**自動で終了する**。code をコピーして貼る操作は無い。
-
-```
-https://accounts.google.com/o/oauth2/v2/auth?client_id=510209981354-...
-
-この URL をブラウザで開いて Google にログインしてください。
-ログインが終わると、このコマンドは自動で終了します。
-logged in with Google (token stored in ...)
-```
-
-成功すると `session.json` にトークンが保存され、以降のコマンドが自動で使う。
-トークンの値は表示されない。
+標準入力からも渡せる。貼り付けでもパイプでもよい。
 
 ```bash
-sakiyomi auth status
+echo "$TOKEN" | sakiyomi auth import-token --stdin
 ```
 
-### 戻ってくる仕組み
+取り込み時に `GET /me` で検証する。通らなければ保存しない。
 
-アプリのリダイレクト先は `app.sakiyomi.mobile:/oauthredirect` というカスタムスキーム
-（バンドル 702228-702234）。Google は loopback も LAN IP も https も OOB も受け付けない
-（すべて実測で拒否）。そのため、このスキームのハンドラを OS に登録する。
-
-`auth login` が自動で登録し、ブラウザがリダイレクトすると OS が
-`sakiyomi auth callback "<URI>"` を起動する。待機中のプロセスが結果を受け取って終了する。
-既存の登録は上書きされ、元には戻らない。`auth unregister` で消せる。
-
-```bash
-sakiyomi auth register      # 明示的に登録
-sakiyomi auth unregister    # 登録を消す
+```
+$ sakiyomi auth import-token --token "<token>"
+{
+  "ok": true,
+  "verified": true,
+  "token_length": 64,
+  "state_path": "..."
+}
 ```
 
-### サーバー・SSH 先でログインする（ヘッドレス）
-
-ブラウザが無いマシンでも同じ流れで完結する。URL をブラウザのあるマシンで開き、
-そのマシンから待機中のマシンへリダイレクトを転送する。
+`--dry-run` を付けると、検証も保存もしない。
 
 ```bash
-# サーバー側（待機するマシン）
-sakiyomi auth login
-# → URL が出て、127.0.0.1:8765 で待ち受ける
+sakiyomi auth import-token --token "$TOKEN" --dry-run
 ```
 
-ブラウザのあるマシンで URL を開くと `app.sakiyomi.mobile:/oauthredirect?...` に
-リダイレクトされる。そのマシンにも CLI を置き、転送先を指定して登録する。
+### 保存せずに 1 回だけ使う
 
 ```bash
-# ブラウザ側のマシン（1 回だけ）
-SAKIYOMI_RELAY=http://<サーバー>:8765/code sakiyomi auth register
-```
-
-以後はブラウザがリダイレクトした瞬間、OS がハンドラを起動し、その CLI が URI を
-サーバーへ POST する。サーバー側の `auth login` は完了してトークンを保存する。
-**人が code を打つ場面はどこにも無い。**
-
-SSH 越しなら、ポート転送だけで足りる。
-
-```bash
-ssh -L 8765:127.0.0.1:8765 <server>
-# サーバー側で: sakiyomi auth login
-# ローカル側で: sakiyomi auth register --relay 127.0.0.1:8765 → URL を開く
-```
-
-待ち受けは環境変数で変えられる。
-
-| 変数 | 用途 | 既定 |
-|---|---|---|
-| `SAKIYOMI_RELAY_BIND` | 待ち受けるアドレス | `127.0.0.1:8765` |
-| `SAKIYOMI_RELAY` | 転送先（`auth register` に焼き込む） | なし |
-| `SAKIYOMI_NO_RELAY` | `1` で待ち受けを止める | なし |
-| `SAKIYOMI_BROWSER` | ブラウザ起動コマンド | OS 既定 |
-
-### 登録先と差し替え
-
-| 環境変数 | 既定 (Windows) | 既定 (Linux) |
-|---|---|---|
-| `SAKIYOMI_SCHEME_ROOT` | `HKCU\Software\Classes` | — |
-| `SAKIYOMI_DESKTOP_DIR` | — | `~/.local/share/applications` |
-| `SAKIYOMI_XDG_MIME` | — | `xdg-mime` |
-| `SAKIYOMI_DESKTOP_DATABASE` | — | `update-desktop-database` |
-
-### 確認だけしたいとき
-
-```bash
-sakiyomi auth login --dry-run    # 何もせず、何をするかの説明だけ
-```
-
-### 端末で確立済みのトークンを使う
-
-
-
-
-アプリやエミュレーターですでにログイン済みなら、そのトークンを直接注入できる。こちらが主という運用でも構わない。
-
-```bash
-# 1 回だけ使う
-sakiyomi --token "$TOKEN" positions list
-
-# シェルの間ずっと使う
-export SAKIYOMI_TOKEN="$TOKEN"     # PowerShell: $env:SAKIYOMI_TOKEN = "..."
+sakiyomi --token "$TOKEN" positions list          # 1 回だけ
+export SAKIYOMI_TOKEN="$TOKEN"                    # シェルの間ずっと
 sakiyomi positions list
 ```
 
-優先順位は `--token` > `SAKIYOMI_TOKEN`（または設定ファイルの `token`）> 保存済みセッション。
-`--token` は保存しないので、使い捨てにできる。
+優先順位は `--token` > 保存済みセッション。設定ファイルの `token` にも書ける。
 
-トークンの値はどこにも表示されない（`auth status` が出すのは有無と文字数だけ）。
+トークンの値はどこにも表示されない。`auth status` が出すのは有無と文字数だけ。
+
+```bash
+$ sakiyomi auth status
+{
+  "token_present": true,
+  "token_length": 64,
+  "auth_provider": null,
+  "acquired_via": "import"
+}
+```
+
+### 終了コード
+
+トークンが拒否されたときは 6。入力形式がおかしいときは 2。
+
+| 状況 | 終了コード |
+|---|---|
+| 取り込み成功 | 0 |
+| トークンが 401 で拒否された | 6 |
+| 空白入り・空文字 | 2 |
+| 検証は通ったが保存できない | 1 |
 
 ### ログアウト
 
 ```bash
-sakiyomi auth logout            # サーバーに POST /logout してからローカルも消す
-sakiyomi auth logout --forget   # サーバー呼び出しが失敗してもローカルを消す
+sakiyomi auth logout              # POST /logout してローカルのセッションも消す
+sakiyomi auth logout --forget     # サーバー呼び出しが失敗してもローカルを消す
 ```
+
+### トークンをどこから取るか
+
+アプリでログイン済みなら、端末側にトークンが保存されている。取り出し方は環境による。
+Android エミュレーターなら `adb` でアプリのデータ領域を読む、実機なら開発者向けの
+バックアップ機能を使う、といった手順になる。この CLI はその値を渡される前提で動く。
 
 ## 読み取り
 

@@ -64,8 +64,14 @@ jobs:
           grep -Fq '"base": "https://sakiyomi.app/api"' "$RUNNER_TEMP/status.json"
           grep -Fq '"token_present": false' "$RUNNER_TEMP/status.json"
 
-          # --dry-run must not print a URL (nothing is opened) and must not fail.
-          "$BIN" auth login --dry-run
+          # Token import must reject an unusable value without writing state.
+          set +e
+          "$BIN" auth import-token --token wrong > /dev/null 2>&1
+          RC=$?
+          set -e
+          [ "$RC" = "6" ] || { echo "expected exit 6 for a rejected token, got $RC"; exit 1; }
+          [ ! -f "$SAKIYOMI_STATE" ] || { echo "a rejected token must not be stored"; exit 1; }
+          "$BIN" auth import-token --token wrong --dry-run > /dev/null
 
   mcp:
     name: mcp handshake

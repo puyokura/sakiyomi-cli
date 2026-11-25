@@ -74,9 +74,16 @@ exit=0
 
 ## 4. 未検証（明示）
 
-- **認証後の全経路**。`/login` の実測は資格情報が無いため行っていない。
-  実装は `POST /login {email,password}` → 応答 `token` → `session.json` 保存、までを
-  バンドル（356223-356228 / 356164-356166）に基づいて組んであるが、実サーバーでの確認は未了。
+- **認証後の全経路**。実アカウントでの確認は行った（`GET /me` 200、`coins`/`points`、
+  `positions`、`ledger`、`missions`、`notices`、`blocks`、`rankings`、`claim`、`buy`、`sell`
+  の実測を含む）。ただし網羅ではない。`transfer` / `gift-exchange` / `invite-claim` は
+  ポイントが動くため `--dry-run` のみで実行していない。
+- **OAuth はこの CLI には無い。** Google の認可コードはカスタムスキーム
+  `app.sakiyomi.mobile:/oauthredirect` に返り、Google はこのクライアントについて
+  loopback / LAN IP / https / OOB のいずれも拒否する（4 種とも実測）。したがって
+  CLI 単体で認可コードを受け取る経路が存在しない。トークンはアプリ側で確立したものを
+  `auth import-token` で取り込む。取り込み時に `GET /me` で検証し、401 なら保存しない
+  （偽トークンで exit 6・ファイル未生成を実測）。
 - **`/updown/{X}` の引数**。バンドルの唯一の呼び出しは `useUpDownChart(r15, ...)` で、
   `r15` は `source === 'updown' ? SLOT18[subcategory] : null`（749599-749622）から来る。
   SLOT18 は期間セレクタの配列（744613-744622）であり、イベント ID ではない。

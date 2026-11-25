@@ -9,12 +9,10 @@ mod cli;
 mod client;
 mod config;
 mod doctor;
-mod flow;
 mod guard;
+mod import;
 mod mcp;
-mod oauth;
 mod output;
-mod scheme;
 mod session;
 mod transport;
 mod wire;
@@ -267,39 +265,11 @@ fn cmd_auth(c: cli::AuthCmd, settings: &Settings, g: &cli::Global) -> i32 {
             emit(g, &view);
             code::OK
         }
-        cli::AuthCmd::Login => flow::login(settings, g),
-        cli::AuthCmd::Callback(args) => flow::callback(settings, &args.uri, args.relay.as_deref()),
-        cli::AuthCmd::Register => cmd_register(settings),
-        cli::AuthCmd::Unregister => cmd_unregister(),
+        cli::AuthCmd::ImportToken(args) => import::import_token(settings, g, &args),
         cli::AuthCmd::Logout(args) => cmd_logout(args, settings, g),
     }
 }
 
-fn cmd_register(settings: &Settings) -> i32 {
-    match scheme::register(&settings.state_path) {
-        Ok(msg) => {
-            println!("{}", msg);
-            code::OK
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            code::FAILED
-        }
-    }
-}
-
-fn cmd_unregister() -> i32 {
-    match scheme::unregister() {
-        Ok(msg) => {
-            println!("{}", msg);
-            code::OK
-        }
-        Err(e) => {
-            eprintln!("error: {}", e);
-            code::FAILED
-        }
-    }
-}
 fn cmd_logout(args: cli::AuthLogoutArgs, settings: &Settings, g: &cli::Global) -> i32 {
     let session = match load_session(settings) {
         Ok(s) => s,

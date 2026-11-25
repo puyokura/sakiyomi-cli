@@ -183,19 +183,23 @@ pub struct BlockArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCmd {
-    /// Log in with Google. Opens the browser and waits for the OS to hand the
-    /// redirect back (this is the only sign-in the app actually offers).
-    Login,
-    /// Receives the OAuth redirect. The OS runs this; you normally never type it.
-    Callback(AuthCallbackArgs),
-    /// Register this binary as the `app.sakiyomi.mobile` handler.
-    Register,
-    /// Remove the handler registration.
-    Unregister,
+    /// Store a session token that was established elsewhere (the app or an
+    /// emulator). This CLI runs no OAuth flow of its own.
+    ImportToken(AuthImportArgs),
     /// Report whether a usable session is stored.
     Status,
     /// Call POST /logout and forget the stored session.
     Logout(AuthLogoutArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthImportArgs {
+    /// The token value. Omit to read it from stdin.
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+    /// Read the token from stdin even when a terminal is attached.
+    #[arg(long)]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]

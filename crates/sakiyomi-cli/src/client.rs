@@ -473,6 +473,9 @@ impl Api {
 /// 355809 for `/auth/social`), so one extractor serves both. Returns an error
 /// rather than a default when the field is missing: a login that returns no
 /// token did not succeed.
+///
+/// The CLI no longer runs either login, so only the tests call this now.
+#[allow(dead_code)]
 pub fn extract_token(resp: &HttpResponse) -> Result<String, String> {
     match resp.body.get("token") {
         Some(serde_json::Value::String(t)) if !t.trim().is_empty() => Ok(t.clone()),
