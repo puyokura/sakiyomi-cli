@@ -124,9 +124,46 @@ sakiyomi auth logout --forget     # サーバー呼び出しが失敗しても�
 
 ### トークンをどこから取るか
 
-アプリでログイン済みなら、端末側にトークンが保存されている。取り出し方は環境による。
-Android エミュレーターなら `adb` でアプリのデータ領域を読む、実機なら開発者向けの
-バックアップ機能を使う、といった手順になる。この CLI はその値を渡される前提で動く。
+アプリでログイン済みなら、端末側にトークンが保存されている。保存値は Expo の
+SecureStore に AES 暗号文で入っており、鍵は AndroidKeyStore にある。暗号文を直接
+復号するのは現実的でない（実測で `key_v1` は keystore の永続ストアに見つからなかった）。
+
+代わりに、復号結果が JavaScript へ返る瞬間を捕まえる。`tools/token-extract/extract_token.py`
+がそれを行う。実測で動く。
+
+**前提**: root の取れた Android（エミュレーター可）と、frida。バージョンを揃える。
+
+```bash
+# 端末側
+adb shell "/data/local/tmp/frida-server &"
+adb forward tcp:27042 tcp:27042
+adb shell /data/local/tmp/frida-server --version      # 例: 16.7.19
+
+# 手元側（端末と同じ版を入れる）
+pip install "frida==16.7.19"
+
+# 抽出（アプリは起動しない状態にしておく）
+python tools/token-extract/extract_token.py --out token.txt
+
+# 取り込む
+sakiyomi auth import-token --stdin < token.txt
+```
+
+捕まえる対象は `expo.modules.securestore.encryptors.AESEncryptor.decryptItem` の
+戻り値だけ。鍵を扱う必要はない。
+
+**実測で分かった落とし穴**（両方とも実際に踏んだ）:
+
+- **バージョンを合わせないと動かない。** 端末の frida-server が 16.7.19 でクライアントが
+  17.24.2 だと、`typeof Java` が `undefined` になり、フックが一切刺さらない。
+- **アプリを起動した後では取れない。** トークンは起動時に復号されるので、後から
+  attach しても復号経路を通らない。`spawn` で止めた状態でフックを刺してから再開する。
+- **TLS 傍受では取れない。** このアプリはプロキシ設定を無視して 443 に直接つなぐ。
+  実測では mitmproxy に接続が 1 件も来なかった。むしろプロキシ設定を入れると
+  アプリの通信が壊れた（`通信できません`）。この経路は使わない。
+
+実機では root か debuggable が必要で難易度は上がる。iOS は別の手法になる。この
+スクリプトは Android の、しかも root が取れる環境だけを対象にしている。
 
 ## 読み取り
 

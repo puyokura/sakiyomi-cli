@@ -21,3 +21,7 @@ Thumbs.db
 # 作業環境の仕様書・一時メモは公開しない
 /AGENTS.md
 /tmp_sites.txt
+
+# Python のキャッシュ（CI の py_compile が生成する）
+__pycache__/
+*.pyc

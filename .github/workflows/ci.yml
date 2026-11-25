@@ -39,6 +39,13 @@ jobs:
       - name: test
         run: cargo test --locked --verbose
 
+      # The token extractor runs on a rooted device, which CI does not have, so
+      # only its syntax is checked here. Its behaviour is verified by hand on a
+      # rooted emulator (see README).
+      - name: token extractor syntax
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m py_compile tools/token-extract/extract_token.py
+
       # A compiled binary is not a tested binary: run it and check the exit code
       # and the shape of what it prints.
       - name: smoke (unauthenticated)

@@ -45,6 +45,17 @@
 - `?ids=` はカンマ区切りで複数指定でき、存在するものだけ返る
   （`ids=6663,44775` → `[6663]`）。
 
+- **トークン抽出（実測で成功）**。root の取れた MuMu エミュレーター（Android 14, x86_64）で
+  frida-server 16.7.19 と frida クライアント 16.7.19 を揃え、`spawn` 後に
+  `expo.modules.securestore.encryptors.AESEncryptor.decryptItem` の戻り値をフックして
+  取得した。戻り値は 64 文字で、2 回の実行で同一。得た値を `auth import-token` に渡すと
+  `verified: true`、`GET /me` 200、`positions` と `doctor` も通る。
+  バージョン不一致（サーバ 16 / クライアント 17）では `typeof Java` が `undefined` になり
+  フックが刺さらないこと、起動後に attach すると復号が済んでいて取れないことも実測した。
+- **TLS 傍受は成立しない（実測）**。エミュレーターからホストへの TCP は通るのに、アプリは
+  プロキシ設定を無視して 443 へ直接接続し、mitmproxy には 1 件も来なかった。むしろ
+  プロキシを設定するとアプリの通信が壊れた（`通信できません`）。
+
 ## 3. 金銭操作の安全弁（実測）
 
 `--dry-run` はネットワーク I/O をしない。閉じたポートを base にしても exit 0 で送信内容を表示する。
@@ -78,6 +89,8 @@ exit=0
   `positions`、`ledger`、`missions`、`notices`、`blocks`、`rankings`、`claim`、`buy`、`sell`
   の実測を含む）。ただし網羅ではない。`transfer` / `gift-exchange` / `invite-claim` は
   ポイントが動くため `--dry-run` のみで実行していない。
+- **トークン抽出は、root の無い端末・実機・iOS では未検証。** 検証したのは root の
+  取れた MuMu エミュレーター（Android 14, x86_64）だけ。
 - **OAuth はこの CLI には無い。** Google の認可コードはカスタムスキーム
   `app.sakiyomi.mobile:/oauthredirect` に返り、Google はこのクライアントについて
   loopback / LAN IP / https / OOB のいずれも拒否する（4 種とも実測）。したがって
