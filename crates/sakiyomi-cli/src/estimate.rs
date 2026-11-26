@@ -57,9 +57,17 @@ pub fn buy_estimate(event: &Value, option_id: &str, stake: u64) -> Option<Estima
             .is_some_and(|id| id == option_id)
     })?;
 
+    // `optionWeight()` (675590-675601) prefers `weight`, then `raw_weight`, then
+    // `prob * total`. When the app's `x-prob-display` header is sent, `weight`
+    // already carries the seed-floor maximum, so the first branch is the normal
+    // path; the others exist because a reply without that header has no
+    // `raw_weight` and may have no `weight`.
     let weight = match chosen.get("weight").and_then(|w| w.as_f64()) {
         Some(w) => w,
-        None => chosen.get("prob")?.as_f64()? * total_weight,
+        None => match chosen.get("raw_weight").and_then(|w| w.as_f64()) {
+            Some(w) => w,
+            None => chosen.get("prob")?.as_f64()? * total_weight,
+        },
     };
 
     let stake = stake as f64;
@@ -101,9 +109,12 @@ pub fn annotate_event(event: &mut Value, stake: u64) -> usize {
         // Same fallback as `optionWeight()`: raw weight, else prob * total.
         let weight = match option.get("weight").and_then(|w| w.as_f64()) {
             Some(w) => w,
-            None => match option.get("prob").and_then(|p| p.as_f64()) {
-                Some(p) => p * total_weight,
-                None => continue,
+            None => match option.get("raw_weight").and_then(|w| w.as_f64()) {
+                Some(w) => w,
+                None => match option.get("prob").and_then(|p| p.as_f64()) {
+                    Some(p) => p * total_weight,
+                    None => continue,
+                },
             },
         };
         let total = total_weight + stake_f;
