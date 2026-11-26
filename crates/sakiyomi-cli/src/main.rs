@@ -697,7 +697,9 @@ fn state_action(
         return code::OK;
     }
     if !has_any_token(settings, g, &session) {
-        eprintln!("error: this action needs a session. Run `sakiyomi auth login` or pass --token.");
+        eprintln!(
+            "error: this action needs a session. Run `sakiyomi auth import-token` or pass --token."
+        );
         return code::AUTH;
     }
     if !g.yes && !ask(what, detail) {
@@ -911,7 +913,9 @@ fn money_action(
     }
 
     if !has_any_token(settings, g, &session) {
-        eprintln!("error: this action needs a session. Run `sakiyomi auth login` or pass --token.");
+        eprintln!(
+            "error: this action needs a session. Run `sakiyomi auth import-token` or pass --token."
+        );
         return code::AUTH;
     }
 
