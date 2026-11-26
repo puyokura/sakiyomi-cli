@@ -71,6 +71,20 @@
   `{"ok":true,"quiz_adopt_bonus":1000}`。**削除・編集 API は無い**（`DELETE /quizzes/{id}` と
   その POST はいずれも 404）。
 
+- **`/events?ids=` の上限は 50 件（実測）**。50 件は 200、51 件は 400
+  `{"error":"一覧の続きを読み込めませんでした。上に引っぱって更新してください"}`。
+  上限は件数であって URL 長ではない（長い id 50 件 = URL 299 文字は 200、
+  短い id 51 件 = URL 287 文字は 400）。`events list` の `next_ids` は 300 件あり、
+  そのまま渡すと必ず失敗するので CLI 側で 50 件ずつに刻んで連結する（実測で 300/300 取得）。
+- **`POST /positions/{id}/claim` の仕様（実測）**。body は `{"currency":"point"}` か
+  `{"currency":"coin"}`。受取済みに投げると 409
+  `受け取り済みか、受け取れる報酬がありません`。一括経路は無い（バンドルは
+  `/positions/{id}/claim` のみ）ので、`all` は一覧を読んで 1 件ずつ叩く。
+- **`buy_prob` / `shares` の式（バンドル + 実測）**。`afterBuyProb`（675326-675525）は
+  `buy_prob = (weight + stake) / (total_weight + stake)`、`shares = floor(stake / buy_prob)`。
+  手持ちの確定ポジション 5 件で `floor(stake / buy_prob)` が記録 `shares` と 5/5 一致した。
+  `buy_prob` 自体は買付時点の値なので、後から盤面を読み直して再計算すると一致しない
+  （重みが動くため）。`--dry-run` の推定は「いま買ったら」の値であって記録値の再現ではない。
 ## 3. 金銭操作の安全弁（実測）
 
 `--dry-run` はネットワーク I/O をしない。閉じたポートを base にしても exit 0 で送信内容を表示する。

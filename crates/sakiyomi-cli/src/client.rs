@@ -340,6 +340,20 @@ impl Api {
         WireRequest::post(path).money()
     }
 
+    /// `POST /positions/{id}/claim {currency}` — collect a settled payout
+    /// (bundle 535418-535532). The path is built as `/positions/` + id + `/claim`
+    /// and the body is exactly `{"currency": "point" | "coin"}` (535526-535509).
+    ///
+    /// Measured: calling it on an already-claimed position answers
+    /// `409 受け取り済みか、受け取れる報酬がありません`, so the server both
+    /// records the claim and refuses a repeat.
+    pub fn claim_position(&self, position_id: &str, currency: &str) -> WireRequest {
+        let path = format!("/positions/{}/claim", encode_path_segment(position_id));
+        WireRequest::post(path)
+            .body(serde_json::json!({ "currency": currency }))
+            .money()
+    }
+
     /// `POST /missions/{id}/claim` with no body (bundle 445130-445136).
     pub fn claim(&self, mission_id: &str) -> WireRequest {
         let path = format!("/missions/{}/claim", encode_path_segment(mission_id));
@@ -751,6 +765,18 @@ mod tests {
     }
 
     #[test]
+    fn position_claim_sends_the_currency_in_the_body() {
+        // The app builds `/positions/` + id + `/claim` and sends exactly
+        // `{currency}` (535418-535532). Anything else is a different request.
+        let api = Api::new("1.0.43");
+        let req = api.claim_position("145291", "point");
+        assert_eq!(req.path, "/positions/145291/claim");
+        let body = req.body.unwrap();
+        assert_eq!(body["currency"], "point");
+        assert!(req.money, "a payout claim moves points");
+    }
+
+    #[test]
     fn every_money_builder_sets_the_money_flag() {
         let api = Api::new("1.0.42");
         for req in [
@@ -763,6 +789,8 @@ mod tests {
             api.result_request("e", serde_json::json!({})),
             api.minigame_start(2),
             api.minigame_finish("p", &[1, 2]),
+            api.claim_position("p", "point"),
+            api.create_quiz(&QuizDraft::default()),
         ] {
             assert!(req.money, "{} must be flagged money", req.path);
         }

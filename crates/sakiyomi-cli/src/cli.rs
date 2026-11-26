@@ -314,6 +314,8 @@ pub enum EventsCmd {
 #[derive(Debug, Args)]
 pub struct EventsListArgs {
     /// Comma-separated event ids to fetch instead of the full list.
+    /// The server accepts at most 50 per request (measured: 50 is 200, 51 is
+    /// 400), so larger sets are split and merged automatically.
     #[arg(long, value_delimiter = ',')]
     pub ids: Vec<String>,
     /// Send `trial_ui=1`, which is what the app's `trialParams()` helper
@@ -364,6 +366,23 @@ pub struct EventsUpdownArgs {
 pub enum PositionsCmd {
     /// List your positions (GET /positions?tab=).
     List(PositionsListArgs),
+    /// Collect a settled payout (POST /positions/{id}/claim).
+    Claim(PositionsClaimArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PositionsClaimArgs {
+    /// Position id, or `all` to collect every won position that is still
+    /// unclaimed. `all` reads the list first and claims what it finds.
+    pub position: String,
+    /// Payout currency: `point` or `coin` (bundle 535604-535611). The app
+    /// remembers the last choice, but the request itself always carries one.
+    #[arg(long, default_value = "point")]
+    pub currency: String,
+    /// With `all`, act even if a claim fails part-way. Without it the first
+    /// failure stops the run so a half-collected state is not hidden.
+    #[arg(long)]
+    pub keep_going: bool,
 }
 
 #[derive(Debug, Args)]
@@ -455,6 +474,14 @@ pub struct BuyArgs {
     /// Points to stake.
     #[arg(long)]
     pub stake: u64,
+}
+
+impl BuyArgs {
+    /// The board request used to compute the estimate shown by `--dry-run`.
+    /// It is a plain read of the event the buy targets.
+    pub fn board_request(&self, api: &crate::client::Api) -> crate::wire::WireRequest {
+        api.event(&self.event)
+    }
 }
 
 #[derive(Debug, Args)]

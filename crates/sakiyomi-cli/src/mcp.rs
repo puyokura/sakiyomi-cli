@@ -290,6 +290,20 @@ fn tool_definitions() -> Vec<Value> {
             }}),
         ),
         tool(
+            "position_claim",
+            "Collect a settled payout (POST /positions/{id}/claim). MOVES POINTS. Requires confirm=true.",
+            json!({"type":"object","properties":{
+                "position": {"type":"string",
+                             "description":"Position id, or 'all' to collect every won position that is still unclaimed."},
+                "currency": {"type":"string","default":"point","enum":["point","coin"]},
+
+                "keep_going": {"type":"boolean","default":false,
+                               "description":"With 'all', continue after a failure."},
+                "confirm": {"type":"boolean"},
+                "dry_run": {"type":"boolean","default":false}
+            },"required":["position","confirm"]}),
+        ),
+        tool(
             "missions",
             "List missions (GET /missions).",
             json!({"type":"object","properties":{}}),
@@ -460,6 +474,121 @@ fn call_tool(
         "positions" => {
             let tab = args.get("tab").and_then(|v| v.as_str()).unwrap_or("open");
             Ok(fetch(&transport, &api.positions(tab)))
+        }
+        "position_claim" => {
+            require_confirm(args)?;
+            let position = str_arg(args, "position")?;
+            let currency = args
+                .get("currency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("point");
+            if currency != "point" && currency != "coin" {
+                return Err(RpcError::bad_params("currency must be 'point' or 'coin'"));
+            }
+
+            if position != "all" {
+                let req = api.claim_position(&position, currency);
+                if flag(args, "dry_run") {
+                    return Ok(text_result(crate::guard::describe(
+                        &req,
+                        transport.base(),
+                        session.token(),
+                    )));
+                }
+                let (code, msg) = crate::guard::MoneyGuard::new(
+                    &transport,
+                    req,
+                    format!("claim payout for position {}", position),
+                )
+                .run()
+                .report();
+                return Ok(if code == 0 {
+                    text_result(msg)
+                } else {
+                    error_result(msg)
+                });
+            }
+
+            // 'all': read the list, then claim what it shows. The list reply is
+            // not printed; only the claim outcomes are.
+            let list = match transport.send(&api.positions("result")) {
+                Ok(r) if (200..300).contains(&r.status) => r,
+                Ok(r) => {
+                    return Ok(error_result(format!(
+                        "could not read positions: HTTP {}\n{}",
+                        r.status,
+                        crate::output::to_json(&r.body)
+                    )))
+                }
+                Err(e) => return Ok(error_result(format!("could not read positions: {}", e))),
+            };
+            let pending: Vec<String> = list
+                .body
+                .get("positions")
+                .and_then(|v| v.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|p| {
+                            p.get("status").and_then(|s| s.as_str()) == Some("won")
+                                && p.get("unclaimed").and_then(|u| u.as_i64()) == Some(1)
+                        })
+                        .filter_map(|p| {
+                            p.get("id")
+                                .and_then(|id| id.as_i64())
+                                .map(|n| n.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if pending.is_empty() {
+                return Ok(text_result("ok: no unclaimed payouts"));
+            }
+            if flag(args, "dry_run") {
+                return Ok(text_result(format!(
+                    "would claim {} payout(s): {}",
+                    pending.len(),
+                    pending.join(", ")
+                )));
+            }
+
+            let keep_going = flag(args, "keep_going");
+            let mut done = Vec::new();
+            let mut failed = Vec::new();
+            for id in &pending {
+                let req = api.claim_position(id, currency);
+                let (code, msg) = crate::guard::MoneyGuard::new(
+                    &transport,
+                    req,
+                    format!("claim payout for position {}", id),
+                )
+                .run()
+                .report();
+                if code == 0 {
+                    done.push(format!("{}: {}", id, msg));
+                } else {
+                    failed.push(format!("{}: {}", id, msg));
+                    if !keep_going {
+                        break;
+                    }
+                }
+            }
+            let mut out = String::new();
+            if !done.is_empty() {
+                out.push_str(&format!("claimed {}:\n{}\n", done.len(), done.join("\n")));
+            }
+            if !failed.is_empty() {
+                out.push_str(&format!(
+                    "failed {}:\n{}\n",
+                    failed.len(),
+                    failed.join("\n")
+                ));
+            }
+            Ok(if failed.is_empty() {
+                text_result(out.trim_end().to_string())
+            } else {
+                error_result(out.trim_end().to_string())
+            })
         }
         "missions" => Ok(fetch(&transport, &api.missions())),
         "ledger" => {

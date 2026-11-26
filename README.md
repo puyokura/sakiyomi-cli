@@ -193,7 +193,7 @@ sakiyomi config                                   # 機能フラグ（認証不�
 sakiyomi me                                       # 自分のアカウント（要ログイン）
 
 sakiyomi events list                              # 一覧（30 件 + next_ids）
-sakiyomi events list --ids 44909,6663              # 指定 ID だけ
+sakiyomi events list --ids 44909,6663              # 指定 ID だけ（50 件超は自動で分割）
 sakiyomi events list --trial                      # trial_ui=1 を付ける
 sakiyomi events show 44909                        # 1 件の詳細（{event, series}）
 sakiyomi events history 44909                     # 確率の推移（既定 1w。--period 1d/1m/all）
@@ -203,7 +203,9 @@ sakiyomi events categories                        # カテゴリ 13 件
 sakiyomi events subcategories soccer              # サブカテゴリ
 
 sakiyomi positions list                           # 自分のポジション（要ログイン）
-sakiyomi positions list --tab closed              # タブ指定
+sakiyomi positions list --tab result              # タブ指定（active / result）
+sakiyomi positions claim <position_id>            # 的中分の払い戻しを受け取る
+sakiyomi positions claim all                      # 未受取の won をまとめて受け取る
 sakiyomi missions list                            # ミッション（未認証でも読める）
 sakiyomi ledger list                              # ポイント履歴（既定 coin、--currency point）
 sakiyomi notices list                             # お知らせ
@@ -343,6 +345,8 @@ sakiyomi quiz --title "波よみクイズ" \
 sakiyomi buy --event <event_id> --option <option_id> --stake <points>
 sakiyomi sell <position_id>
 sakiyomi claim <mission_id>
+sakiyomi positions claim <position_id> [--currency point|coin]
+sakiyomi positions claim all [--keep-going]
 sakiyomi transfer --to <user> --amount <n> [--message "..."]
 sakiyomi invite-claim <code>
 sakiyomi gift-exchange --batch <id> --items '[{"id":"g1"}]'
@@ -350,7 +354,10 @@ sakiyomi gift-exchange --batch <id> --items '[{"id":"g1"}]'
 
 ### まず --dry-run
 
-送信内容を表示して終わる。ネットワーク I/O はしない。セッションが無くても動く。
+送信内容を表示して終わる。**買付系の `--dry-run` は送信内容に加えて、買付後の
+`buy_prob` と `shares` の推定も表示する**（一覧の `prob` は買付価格ではない）。
+推定のため対象イベントを 1 回 GET するが、買付そのものは送らない。
+セッションが無くても動く。
 
 ```bash
 $ sakiyomi buy --event 44909 --option 111516 --stake 100 --dry-run
@@ -442,17 +449,18 @@ state          <- env
 sakiyomi mcp
 ```
 
-stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 18 個:
+stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 19 個:
 
 ```
 doctor, config, me, events_list, event_history, live_board,
-positions, missions, ledger, rankings, notices, quizzes_mine,
-bonus_status, wave_play, quiz_create,
+positions, position_claim, missions, ledger, rankings, notices,
+quizzes_mine, bonus_status, wave_play, quiz_create,
 buy, sell, claim
 ```
 
-状態やポイントが動く 5 つ（`buy` / `sell` / `claim` / `wave_play` / `quiz_create`）は
-`confirm: true` が必須。付けなければエラーになり、`dry_run: true` なら送信内容だけ返す。
+状態やポイントが動く 6 つ（`buy` / `sell` / `claim` / `position_claim` / `wave_play` /
+`quiz_create`）は `confirm: true` が必須。付けなければエラーになり、`dry_run: true` なら
+送信内容だけ返す。`position_claim` は `{"position":"all"}` で未受取をまとめて処理する。
 
 ```json
 {"name": "buy", "arguments": {"event": "44909", "option": "111516", "stake": 100, "confirm": true, "dry_run": true}}

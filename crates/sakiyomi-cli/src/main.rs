@@ -9,6 +9,7 @@ mod cli;
 mod client;
 mod config;
 mod doctor;
+mod estimate;
 mod guard;
 mod import;
 mod mcp;
@@ -156,6 +157,20 @@ fn perform(
     g: &cli::Global,
     req: &WireRequest,
 ) -> (i32, Option<serde_json::Value>) {
+    perform_with(settings, g, req, true)
+}
+
+/// `perform` with the printing step optional.
+///
+/// A command that issues several requests and merges them must print once, at
+/// the end; if every request printed on its own the caller would receive several
+/// JSON documents back to back and could not parse any of them.
+fn perform_with(
+    settings: &Settings,
+    g: &cli::Global,
+    req: &WireRequest,
+    print: bool,
+) -> (i32, Option<serde_json::Value>) {
     let session = match load_session(settings) {
         Ok(s) => s,
         Err(c) => return (c, None),
@@ -172,7 +187,9 @@ fn perform(
 
     match client::classify(resp, transport.has_token(), req.path == "/login") {
         Ok(r) => {
-            emit(g, &r.body);
+            if print {
+                emit(g, &r.body);
+            }
             (code::OK, Some(r.body))
         }
         Err(e) => {
@@ -185,11 +202,15 @@ fn perform(
                 client::ApiError::Status {
                     status: 401, body, ..
                 } => {
-                    emit(g, body);
+                    if print {
+                        emit(g, body);
+                    }
                     code::AUTH
                 }
                 client::ApiError::Status { body, .. } => {
-                    emit(g, body);
+                    if print {
+                        emit(g, body);
+                    }
                     code::FAILED
                 }
                 client::ApiError::Transport(_) => code::FAILED,
@@ -338,11 +359,101 @@ fn cmd_logout(args: cli::AuthLogoutArgs, settings: &Settings, g: &cli::Global) -
 
 // ---- reads ----------------------------------------------------------------
 
+/// How many ids one `GET /events?ids=` accepts.
+///
+/// Measured on the live server: 50 ids return 200 and 51 return 400 with
+/// 「一覧の続きを読み込めませんでした。上に引っぱって更新してください」.
+/// The limit is the count, not the URL length — 50 long ids (URL 299 chars)
+/// pass while 51 short ids (URL 287 chars) fail. `next_ids` commonly carries
+/// several hundred entries, so passing the whole list through unchanged fails
+/// every time.
+const MAX_IDS_PER_REQUEST: usize = 50;
+
+/// `events list`, with the id batches split to the server's limit and merged.
+///
+/// The merge is not cosmetic: each batch answers `{events}` and nothing else, so
+/// the results are concatenated in the order the ids were asked for and
+/// returned under the same shape a single request produces. Anything the server
+/// returns beyond `events` (today only `next_ids`, and only on a full-list call)
+/// is carried over from the first response so the paging contract is unchanged.
+fn cmd_events_list(a: cli::EventsListArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if a.ids.is_empty() {
+        return read(settings, g, |api| api.events(None, a.trial));
+    }
+    if a.ids.len() <= MAX_IDS_PER_REQUEST {
+        return read(settings, g, |api| api.events(Some(&a.ids), a.trial));
+    }
+    if g.dry_run {
+        // Show what each batch would send, because a preview of one request
+        // would hide the split that the caller is about to trigger.
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        for (i, chunk) in a.ids.chunks(MAX_IDS_PER_REQUEST).enumerate() {
+            let api = Api::new(settings.app_version.clone());
+            let req = api.events(Some(chunk), a.trial);
+            eprintln!(
+                "-- batch {}/{} ({} ids)",
+                i + 1,
+                a.ids.len().div_ceil(MAX_IDS_PER_REQUEST),
+                chunk.len()
+            );
+            print!(
+                "{}",
+                guard::describe(&req, transport.base(), session.token())
+            );
+        }
+        eprintln!("dry-run: nothing was sent");
+        return code::OK;
+    }
+
+    let chunks: Vec<&[String]> = a.ids.chunks(MAX_IDS_PER_REQUEST).collect();
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    let mut shape: Option<serde_json::Value> = None;
+    let mut failed = 0;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let api = Api::new(settings.app_version.clone());
+        let req = api.events(Some(chunk), a.trial);
+        let (rc, body) = perform_with(settings, g, &req, false);
+        let Some(body) = body else {
+            eprintln!(
+                "error: batch {} of {} ({} ids) failed; nothing was printed for it",
+                i + 1,
+                chunks.len(),
+                chunk.len()
+            );
+            failed += 1;
+            continue;
+        };
+        if let Some(list) = body.get("events").and_then(|v| v.as_array()) {
+            merged.extend(list.iter().cloned());
+        }
+        if shape.is_none() {
+            shape = Some(body);
+        } else if let Some(next) = body.get("next_ids") {
+            // Only the first response defines the paging cursor; later batches
+            // answer without one, and letting them overwrite it would make the
+            // caller believe the list ended.
+            let _ = next;
+        }
+        let _ = rc;
+    }
+
+    if failed > 0 {
+        eprintln!("error: {} of {} batches failed", failed, chunks.len());
+        return code::FAILED;
+    }
+
+    let mut out = shape.unwrap_or_else(|| serde_json::json!({ "events": [] }));
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("events".to_string(), serde_json::Value::Array(merged));
+    }
+    emit(g, &out);
+    code::OK
+}
+
 fn cmd_events(c: cli::EventsCmd, settings: &Settings, g: &cli::Global) -> i32 {
     match c {
-        cli::EventsCmd::List(a) => read(settings, g, |api| {
-            api.events(if a.ids.is_empty() { None } else { Some(&a.ids) }, a.trial)
-        }),
+        cli::EventsCmd::List(a) => cmd_events_list(a, settings, g),
         cli::EventsCmd::Show(a) => {
             // `/events/{id}` returns `{event, series}` and answers 200 even for a
             // closed event, which `/events?ids=` does not — that is why this is a
@@ -390,7 +501,122 @@ fn cmd_events(c: cli::EventsCmd, settings: &Settings, g: &cli::Global) -> i32 {
 fn cmd_positions(c: cli::PositionsCmd, settings: &Settings, g: &cli::Global) -> i32 {
     match c {
         cli::PositionsCmd::List(a) => read(settings, g, |api| api.positions(&a.tab)),
+        cli::PositionsCmd::Claim(a) => cmd_positions_claim(a, settings, g),
     }
+}
+
+/// `positions claim` — collect settled payouts.
+///
+/// One position id claims exactly that one. `all` reads `GET /positions?tab=result`
+/// first and claims every `won` row whose `unclaimed` is 1, in id order, because
+/// the server has no bulk route (measured: the bundle only builds
+/// `/positions/{id}/claim`). Each claim is its own confirmed action so a run that
+/// stops part-way leaves an obvious record instead of an ambiguous one.
+fn cmd_positions_claim(a: cli::PositionsClaimArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if a.currency != "point" && a.currency != "coin" {
+        eprintln!("error: --currency must be 'point' or 'coin'");
+        return code::USAGE;
+    }
+
+    if a.position == "all" {
+        // The list is read only to find candidates; printing it too would put
+        // a positions document in front of the claim results.
+        let list_req = {
+            let api = Api::new(settings.app_version.clone());
+            api.positions("result")
+        };
+        if g.dry_run {
+            let session = load_session(settings).unwrap_or_default();
+            let transport = make_transport(settings, g, &session);
+            print!(
+                "{}",
+                guard::describe(&list_req, transport.base(), session.token())
+            );
+            eprintln!("dry-run: nothing was sent");
+            return code::OK;
+        }
+        let (rc, body) = perform_with(settings, g, &list_req, false);
+        if rc != code::OK {
+            return rc;
+        }
+        let Some(body) = body else {
+            return if g.dry_run { code::OK } else { code::FAILED };
+        };
+        let pending: Vec<String> = body
+            .get("positions")
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|p| {
+                        p.get("status").and_then(|s| s.as_str()) == Some("won")
+                            && p.get("unclaimed").and_then(|u| u.as_i64()) == Some(1)
+                    })
+                    .filter_map(|p| {
+                        p.get("id")
+                            .and_then(|id| id.as_i64())
+                            .map(|n| n.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if pending.is_empty() {
+            // Not an error: "nothing to collect" is the steady state.
+            println!("ok: no unclaimed payouts");
+            return code::OK;
+        }
+        eprintln!(
+            "{} unclaimed payout(s): {}",
+            pending.len(),
+            pending.join(", ")
+        );
+
+        let mut failures = 0;
+        for id in &pending {
+            let req = {
+                let api = Api::new(settings.app_version.clone());
+                api.claim_position(id, &a.currency)
+            };
+            let rc = money_action(
+                settings,
+                g,
+                req,
+                &format!("claim payout for position {}", id),
+                &format!("{} of the payout in {}", a.currency, a.currency),
+            );
+            if rc == code::OK {
+                continue;
+            }
+            if rc == code::DECLINED {
+                // Declining is a decision, not a failure: stop quietly.
+                eprintln!("stopped at position {}", id);
+                return code::DECLINED;
+            }
+            failures += 1;
+            eprintln!("position {} was not collected (exit {})", id, rc);
+            if !a.keep_going {
+                eprintln!("stopping; pass --keep-going to collect the rest anyway");
+                return rc;
+            }
+        }
+        return if failures == 0 {
+            code::OK
+        } else {
+            code::FAILED
+        };
+    }
+
+    let req = {
+        let api = Api::new(settings.app_version.clone());
+        api.claim_position(&a.position, &a.currency)
+    };
+    money_action(
+        settings,
+        g,
+        req,
+        &format!("claim payout for position {}", a.position),
+        &format!("the payout is credited as {}", a.currency),
+    )
 }
 
 fn cmd_missions(_c: cli::MissionsCmd, settings: &Settings, g: &cli::Global) -> i32 {
@@ -735,6 +961,48 @@ fn cmd_buy(a: cli::BuyArgs, settings: &Settings, g: &cli::Global) -> i32 {
         let api = Api::new(settings.app_version.clone());
         api.buy(&a.event, &a.option, a.stake)
     };
+    if g.dry_run {
+        // The estimate has to be shown *before* the purchase, which is exactly
+        // what the issue asked for: the listing `prob` is not the buy price.
+        // It is a separate read, so a dry-run now performs one GET (a read,
+        // never a purchase) and prints the estimate next to the request.
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        let board_req = a.board_request(&Api::new(settings.app_version.clone()));
+        print!(
+            "{}",
+            guard::describe(&req, transport.base(), session.token())
+        );
+        if session.token().is_none() {
+            eprintln!("note: no session token; this request would be rejected with 401");
+        }
+        // Printed after the request so the two blocks never interleave, and on
+        // stdout so `--dry-run | jq` style pipes keep it.
+        match transport.send(&board_req) {
+            Ok(resp) if (200..300).contains(&resp.status) => match resp.body.get("event") {
+                Some(event) => match estimate::buy_estimate(event, &a.option, a.stake) {
+                    Some(e) => {
+                        println!("estimate:");
+                        println!("  buy_prob: {:.4}", e.buy_prob);
+                        println!("  shares:   {}", e.shares);
+                        println!("  weight:   {} / total {}", e.weight, e.total_weight);
+                    }
+                    None => eprintln!(
+                        "warning: no estimate; option {} was not found on event {} or the board lacks weights",
+                        a.option, a.event
+                    ),
+                },
+                None => eprintln!("warning: no estimate; the event reply carried no 'event'"),
+            },
+            Ok(resp) => eprintln!(
+                "warning: no estimate; GET /events/{} returned HTTP {}",
+                a.event, resp.status
+            ),
+            Err(e) => eprintln!("warning: no estimate; {}", e),
+        }
+        eprintln!("dry-run: nothing was sent");
+        return code::OK;
+    }
     let detail = format!("{} x {} points on event {}", a.option, a.stake, a.event);
     money_action(settings, g, req, &format!("buy into {}", a.event), &detail)
 }
