@@ -20,6 +20,7 @@ pub const ENV_BASE: &str = "SAKIYOMI_BASE";
 pub const ENV_TOKEN: &str = "SAKIYOMI_TOKEN";
 pub const ENV_CONFIG: &str = "SAKIYOMI_CONFIG";
 pub const ENV_STATE: &str = "SAKIYOMI_STATE";
+pub const ENV_SCHEDULE: &str = "SAKIYOMI_SCHEDULE";
 
 /// On-disk configuration. Every field is optional so a partial file is valid.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -44,6 +45,9 @@ pub struct Settings {
     pub timeout_secs: u64,
     pub token: Option<String>,
     pub state_path: PathBuf,
+    /// Where the purchase queue lives. Defaults to `schedule.json` beside the
+    /// session file, so one `--state` flag moves both.
+    pub schedule_path: PathBuf,
     pub config_path: Option<PathBuf>,
     pub app_version: String,
 }
@@ -75,6 +79,7 @@ pub struct Overrides {
     pub token: Option<String>,
     pub config: Option<PathBuf>,
     pub state: Option<PathBuf>,
+    pub schedule: Option<PathBuf>,
     pub timeout_secs: Option<u64>,
 }
 
@@ -145,6 +150,13 @@ pub fn resolve(ov: &Overrides) -> Result<(Settings, Origins), String> {
     let state_path = state.unwrap_or_else(default_state_path);
     origins.push(("state", src.unwrap_or(Source::Default)));
 
+    let (schedule, src) = first_of([
+        (ov.schedule.clone(), Source::Flag),
+        (env_nonempty(ENV_SCHEDULE).map(PathBuf::from), Source::Env),
+    ]);
+    let schedule_path = schedule.unwrap_or_else(|| default_schedule_path(&state_path));
+    origins.push(("schedule", src.unwrap_or(Source::Default)));
+
     let (app_version, src) = first_of([(f.app_version.clone(), Source::File)]);
     let app_version = app_version.unwrap_or_else(|| crate::wire::APP_VERSION.to_string());
     origins.push(("app_version", src.unwrap_or(Source::Default)));
@@ -162,6 +174,7 @@ pub fn resolve(ov: &Overrides) -> Result<(Settings, Origins), String> {
             timeout_secs,
             token,
             state_path,
+            schedule_path,
             config_path,
             app_version,
         },
@@ -182,6 +195,12 @@ fn first_of<T: Clone, const N: usize>(
 
 /// Default state file: next to the config file. Keeps everything the tool
 /// owns in one directory that the operator can inspect.
+/// The queue file sits beside the session file, so a user who moves one with
+/// `--state` does not silently split the two.
+pub fn default_schedule_path(state_path: &Path) -> PathBuf {
+    state_path.with_file_name("schedule.json")
+}
+
 pub fn default_state_path() -> PathBuf {
     config_dir()
         .unwrap_or_else(|| PathBuf::from("."))

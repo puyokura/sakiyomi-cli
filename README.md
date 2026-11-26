@@ -340,6 +340,62 @@ sakiyomi quiz --title "波よみクイズ" \
 **取り消しはできない。** `DELETE /quizzes/{id}` も編集 API も無い（実測で 404）。
 作ったものは審査に回り、却下されるまで残る。`--dry-run` で中身を確認してから送ること。
 
+## 決めた時刻に自動で買う
+
+`sakiyomi schedule` は買付を予約しておく機能です。予約はファイルに残り、
+`sakiyomi schedule run` が常駐して時刻が来たら買います。CLI のプロセスを
+起動し続ける必要があるのは `run` だけで、それ以外は 1 回で終わります。
+
+```bash
+# 予約する（JST 12:00 に、event 90241 の option 110224 へ 100 コイン）
+sakiyomi schedule add --at 2026-12-01T12:00+09:00 \
+                      --event 90241 --option 110224 --stake 100
+
+sakiyomi schedule list         # 予約の一覧
+sakiyomi schedule remove <id>  # 予約を取り消す（送信はしない）
+
+# 常駐して待つ。Ctrl-C で止めてよい
+sakiyomi schedule run
+
+# 1 件だけ処理して終わる（cron から呼ぶ用）
+sakiyomi schedule run --once
+```
+
+### 時刻の書き方
+
+`--at` は `2026-12-01T12:00+09:00` のようにタイムゾーンを付けて書きます。
+`Z` を付けると UTC です。ファイルには UTC で保存されるので、実行環境の
+タイムゾーンが変わっても予約の時刻は動きません。
+
+タイムゾーンを付けない書き方（`2026-12-01 12:00`）は、そのマシンのローカル時刻として
+解釈します。ただし Windows ではローカルのタイムゾーンを取得する手段が無いため、
+その場合は明示を促すエラー（exit 2）にしています。
+
+### 予約と買付の通貨
+
+`--stake` は**コイン**です。サーバーは `coins` を引きます（ポイントではありません）。
+この点は以前「ポイント」と書いていましたが、実測で誤りが分かったので直しました。
+
+### 落ちたときの扱い
+
+`run` は送信の**前**に「送信中」の印をファイルへ書きます。途中で落ちた場合、
+その予約は `in_flight` のまま残り、次回の `run` でも自動では再送しません。
+サーバーが受け取っている可能性があるためです。状態を自分で確認したあと、
+次のどちらかで確定させてください。
+
+```bash
+sakiyomi schedule reconcile <id> --done    # サーバーが受け取っていた
+sakiyomi schedule reconcile <id> --retry   # 送られていなかった（再送する）
+```
+
+送信が「確実に届かなかった」場合は自動で `not_sent` になり、次回 `run` で再試行します。
+
+### 予約できる範囲
+
+`--stake` は 10〜100,000 コインです。サーバーがこの範囲外を
+`コインは10〜100,000の範囲で入力してください` で拒否するため、`schedule add` の
+時点で同じ境界を検査します。範囲外を受け付けて後で失敗するより、
+オペレーターがその場にいるときに止めるほうが安全です。
 ## 金銭が動く操作
 
 **ここは読んでから使う。**
@@ -350,6 +406,8 @@ sakiyomi sell <position_id>
 sakiyomi claim <mission_id>
 sakiyomi positions claim <position_id> [--currency point|coin]
 sakiyomi positions claim all [--keep-going]
+sakiyomi schedule add --at <time> --event <event> --option <option> --stake <coins>
+sakiyomi schedule run
 sakiyomi transfer --to <user> --amount <n> [--message "..."]
 sakiyomi invite-claim <code>
 sakiyomi gift-exchange --batch <id> --items '[{"id":"g1"}]'
@@ -452,14 +510,18 @@ state          <- env
 sakiyomi mcp
 ```
 
-stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 19 個:
+stdio の JSON-RPC。`initialize` / `tools/list` / `tools/call` を実装している。ツールは 22 個:
 
 ```
 doctor, config, me, events_list, event_history, live_board,
 positions, position_claim, missions, ledger, rankings, notices,
 quizzes_mine, bonus_status, wave_play, quiz_create,
+schedule_list, schedule_add, schedule_remove,
 buy, sell, claim
 ```
+
+`schedule run` は常駐するため MCP には出していません。予約の追加と確認だけを
+MCP から行い、実行は CLI 側で `sakiyomi schedule run` を起動します。
 
 状態やポイントが動く 6 つ（`buy` / `sell` / `claim` / `position_claim` / `wave_play` /
 `quiz_create`）は `confirm: true` が必須。付けなければエラーになり、`dry_run: true` なら

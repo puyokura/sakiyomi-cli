@@ -313,6 +313,7 @@ mod tests {
             timeout_secs: 5,
             token: None,
             state_path: PathBuf::from("does-not-matter"),
+            schedule_path: PathBuf::from("does-not-matter-schedule.json"),
             config_path: None,
             app_version: "1.0.42".into(),
         }

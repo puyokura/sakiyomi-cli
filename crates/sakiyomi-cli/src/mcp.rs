@@ -400,6 +400,29 @@ fn tool_definitions() -> Vec<Value> {
             },"required":["title","options","closes_at","confirm"]}),
         ),
         tool(
+            "schedule_list",
+            "Show the scheduled purchase queue. Read-only.",
+            json!({"type":"object","properties":{}}),
+        ),
+        tool(
+            "schedule_add",
+            "Queue a purchase for a later time. Nothing is sent until `schedule run` is started outside MCP.",
+            json!({"type":"object","properties":{
+                "at": {"type":"string","description":"When to buy, e.g. 2026-12-01T12:00+09:00."},
+                "event": {"type":"string"},
+                "option": {"type":"string"},
+                "stake": {"type":"integer","description":"Coins to stake, 10..100000."},
+                "confirm": {"type":"boolean"}
+            },"required":["at","event","option","stake","confirm"]}),
+        ),
+        tool(
+            "schedule_remove",
+            "Drop an entry from the queue. Nothing is sent.",
+            json!({"type":"object","properties":{
+                "id": {"type":"string"}
+            },"required":["id"]}),
+        ),
+        tool(
             "quizzes_mine",
             "Your own quizzes (GET /quizzes/mine). Read-only.",
             json!({"type":"object","properties":{}}),
@@ -776,6 +799,75 @@ fn call_tool(
         }
         "quizzes_mine" => Ok(fetch(&transport, &api.quizzes_mine())),
 
+        // ---- schedule ---------------------------------------------------------
+        "schedule_list" => {
+            let path = settings.schedule_path.clone();
+            match crate::schedule::Schedule::load(&path) {
+                Ok(q) => {
+                    let body = serde_json::to_value(&q)
+                        .unwrap_or_else(|_| serde_json::json!({"entries": []}));
+                    Ok(text_result(crate::output::to_json(&body)))
+                }
+                Err(e) => Ok(error_result(format!("could not read the queue: {}", e))),
+            }
+        }
+        "schedule_add" => {
+            require_confirm(args)?;
+            let at = str_arg(args, "at")?;
+            let event = str_arg(args, "event")?;
+            let option = str_arg(args, "option")?;
+            let stake = u64_arg(args, "stake")?;
+            if !(10..=100_000).contains(&stake) {
+                return Err(RpcError::bad_params(
+                    "stake must be between 10 and 100000 (the server refuses anything else)",
+                ));
+            }
+            let at = match crate::schedule::parse_at(&at) {
+                Ok(v) => v,
+                Err(e) => return Err(RpcError::bad_params(format!("at: {}", e))),
+            };
+            let path = settings.schedule_path.clone();
+            let mut q = match crate::schedule::Schedule::load(&path) {
+                Ok(q) => q,
+                Err(e) => return Ok(error_result(format!("could not read the queue: {}", e))),
+            };
+            let id = q.new_id();
+            q.entries.push(crate::schedule::Entry {
+                id: id.clone(),
+                at,
+                event,
+                option,
+                stake,
+                state: crate::schedule::State::Pending,
+                note: None,
+                updated_at: None,
+            });
+            if let Err(e) = q.save(&path) {
+                return Ok(error_result(format!("could not write the queue: {}", e)));
+            }
+            Ok(text_result(format!(
+                "queued {}. Nothing is sent until `sakiyomi schedule run` is started.",
+                id
+            )))
+        }
+        "schedule_remove" => {
+            let id = str_arg(args, "id")?;
+            let path = settings.schedule_path.clone();
+            let mut q = match crate::schedule::Schedule::load(&path) {
+                Ok(q) => q,
+                Err(e) => return Ok(error_result(format!("could not read the queue: {}", e))),
+            };
+            let before = q.entries.len();
+            q.entries.retain(|e| e.id != id);
+            if q.entries.len() == before {
+                return Ok(error_result(format!("no entry with id {}", id)));
+            }
+            if let Err(e) = q.save(&path) {
+                return Ok(error_result(format!("could not write the queue: {}", e)));
+            }
+            Ok(text_result(format!("removed {}", id)))
+        }
+
         // ---- money ---------------------------------------------------------
         "buy" => {
             require_confirm(args)?;
@@ -894,6 +986,7 @@ mod tests {
             timeout_secs: 1,
             token: None,
             state_path: PathBuf::from("unused.json"),
+            schedule_path: PathBuf::from("unused-schedule.json"),
             config_path: None,
             app_version: "1.0.42".into(),
         }

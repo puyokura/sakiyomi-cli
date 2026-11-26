@@ -14,6 +14,7 @@ mod guard;
 mod import;
 mod mcp;
 mod output;
+mod schedule;
 mod session;
 mod transport;
 mod wave;
@@ -46,6 +47,8 @@ mod code {
     pub const AUTH: i32 = 6;
     /// The request definitely never reached the server; retrying is safe.
     pub const NOT_SENT: i32 = 4;
+    /// The request may have been processed; retrying is not safe.
+    pub const OUTCOME_UNKNOWN: i32 = 5;
 }
 
 fn main() {
@@ -94,6 +97,7 @@ fn run(cli: Cli) -> i32 {
         Command::Bonus(c) => cmd_bonus(c, &settings, &cli.global),
         Command::Wave(c) => cmd_wave(c, &settings, &cli.global),
         Command::Quiz(c) => cmd_quiz(c, &settings, &cli.global),
+        Command::Schedule(c) => cmd_schedule(c, &settings, &cli.global),
     }
 }
 
@@ -767,9 +771,80 @@ fn cmd_bonus(c: cli::BonusCmd, settings: &Settings, g: &cli::Global) -> i32 {
 /// `wave status`: the same offer, without a play id.
 fn cmd_wave(c: cli::WaveCmd, settings: &Settings, g: &cli::Global) -> i32 {
     match c {
-        cli::WaveCmd::Status => read(settings, g, |api| api.ads_reward("", "", "")),
+        cli::WaveCmd::Status => cmd_wave_status(settings, g),
         cli::WaveCmd::Play(a) => cmd_wave_play(a, settings, g),
     }
+}
+
+/// `wave status` — two separate counters, reported separately.
+///
+/// The response of a finished round carries `today`, but `/ads/reward` does not:
+/// its `used_today` counts *ads*, not minigame clears. Reporting only that value
+/// made a second clear of the day look like a bug, because the round says
+/// `free_done: true` while the ad counter still reads 0. This joins the two
+/// sources so each number is labelled with what it counts.
+fn cmd_wave_status(settings: &Settings, g: &cli::Global) -> i32 {
+    // Both reads are collected and printed once, at the end; letting each print
+    // would put two JSON documents in front of the caller.
+    let ads_req = {
+        let api = Api::new(settings.app_version.clone());
+        api.ads_reward("", "", "")
+    };
+    if g.dry_run {
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        print!(
+            "{}",
+            guard::describe(&ads_req, transport.base(), session.token())
+        );
+        eprintln!("dry-run: nothing was sent");
+        return code::OK;
+    }
+    let (rc, body) = perform_with(settings, g, &ads_req, false);
+    if rc != code::OK {
+        return rc;
+    }
+    let Some(ads) = body else {
+        return code::FAILED;
+    };
+
+    // The minigame's own count is only visible through the ledger, so read it
+    // rather than infer it from the ad counter.
+    let ledger_req = {
+        let api = Api::new(settings.app_version.clone());
+        api.ledger("coin")
+    };
+    let (lrc, ledger) = perform_with(settings, g, &ledger_req, false);
+    let minigame_coins = if lrc == code::OK {
+        ledger
+            .as_ref()
+            .map(|l| crate::schedule::sum_today(l, "minigame"))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut out = ads.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "ads".to_string(),
+            serde_json::json!({
+                "used_today": ads.get("used_today").cloned().unwrap_or(serde_json::Value::Null),
+                "daily_limit": ads.get("daily_limit").cloned().unwrap_or(serde_json::Value::Null),
+                "remaining": ads.get("remaining").cloned().unwrap_or(serde_json::Value::Null),
+            }),
+        );
+        obj.insert(
+            "minigame".to_string(),
+            serde_json::json!({
+                "coins_today": minigame_coins.iter().map(|e| e.0).sum::<i64>(),
+                "entries": minigame_coins.iter().map(|(_, at)| at.clone()).collect::<Vec<_>>(),
+
+            }),
+        );
+    }
+    emit(g, &out);
+    code::OK
 }
 
 /// `wave play`: one round, start to finish, without a screen.
@@ -872,6 +947,14 @@ fn cmd_wave_play(a: cli::WavePlayArgs, settings: &Settings, g: &cli::Global) -> 
     let outcome = guard::MoneyGuard::new(&transport, finish, "finish one wave round").run();
     let (rc, msg) = outcome.report();
     println!("{}", msg);
+    // A cleared round that pays nothing is the normal second clear of the day.
+    // Say why, so it does not read as a failure. The text after "ok: " is the
+    // response body, which is the only place the round's own day counter lives.
+    if rc == 0 {
+        if let Some(note) = no_payout_note(&msg) {
+            eprintln!("note: {}", note);
+        }
+    }
 
     rc
 }
@@ -989,7 +1072,426 @@ fn cmd_quiz_create(a: cli::QuizArgs, settings: &Settings, g: &cli::Global) -> i3
     )
 }
 
-// ---- money ----------------------------------------------------------------
+// ---- schedule -------------------------------------------------------------
+
+/// `schedule`: queue purchases for a later time and run the queue.
+///
+/// Nothing here makes a purchase itself except `run`, which goes through the
+/// same [`guard::MoneyGuard`] a manual `buy` does. The queue file is the durable
+/// part; `run` is the process that stays resident, so stopping and restarting it
+/// loses nothing that was already recorded.
+fn cmd_schedule(c: cli::ScheduleCmd, settings: &Settings, g: &cli::Global) -> i32 {
+    match c {
+        cli::ScheduleCmd::Add(a) => cmd_schedule_add(a, settings),
+        cli::ScheduleCmd::List => cmd_schedule_list(settings, g),
+        cli::ScheduleCmd::Remove(a) => cmd_schedule_remove(a, settings),
+        cli::ScheduleCmd::Reconcile(a) => cmd_schedule_reconcile(a, settings, g),
+        cli::ScheduleCmd::Run(a) => cmd_schedule_run(a, settings, g),
+    }
+}
+
+fn cmd_schedule_add(a: cli::ScheduleAddArgs, settings: &Settings) -> i32 {
+    // The server rejects anything outside 10..=100_000 with
+    // 「コインは10〜100,000の範囲で入力してください」 (measured), so a queue that
+    // accepts 1 would only fail later, after the operator has left.
+    if !(10..=100_000).contains(&a.stake) {
+        eprintln!(
+            "error: --stake must be between 10 and 100000 (the server refuses anything else)"
+        );
+        return code::USAGE;
+    }
+    // A bare `YYYY-MM-DD HH:MM` has no offset, and the operator means their own
+    // clock, not UTC. `parse_at` treats a missing offset as UTC, so the local
+    // offset is appended here rather than guessed inside the parser.
+    let at = match schedule::parse_at(&a.at) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: --at: {}", e);
+            return code::USAGE;
+        }
+    };
+    // An explicit offset (or `Z`) means the operator already chose a zone; a
+    // bare time means their own clock. Only the time part is inspected, because
+    // the date part always contains `-`.
+    let explicit_offset =
+        a.at.split_once('T')
+            .or_else(|| a.at.split_once(' '))
+            .map(|(_, t)| t.contains('+') || t.contains('-') || t.contains('Z'))
+            .unwrap_or(false);
+    let at = if explicit_offset {
+        at
+    } else {
+        match local_offset_minutes() {
+            Some(off) => match schedule::normalise_with_offset(&a.at, off) {
+                Ok(v) => v,
+                Err(_) => at,
+            },
+            None => {
+                eprintln!(
+                    "error: --at has no UTC offset and this platform does not report one; write it explicitly (e.g. 2026-12-01T12:00+09:00)"
+                );
+                return code::USAGE;
+            }
+        }
+    };
+
+    let path = settings.schedule_path.clone();
+    let mut q = match schedule::Schedule::load(&path) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return code::FAILED;
+        }
+    };
+    let id = q.new_id();
+    q.entries.push(schedule::Entry {
+        id: id.clone(),
+        at: at.clone(),
+        event: a.event.clone(),
+        option: a.option.clone(),
+        stake: a.stake,
+        state: schedule::State::Pending,
+        note: None,
+        updated_at: None,
+    });
+    if let Err(e) = q.save(&path) {
+        eprintln!("error: {}", e);
+        return code::FAILED;
+    }
+    eprintln!(
+        "queued {} at {} ({} coins on event {}",
+        id, at, a.stake, a.event
+    );
+    let entry = q.entries.last().cloned();
+    if let Some(e) = entry {
+        emit_entry(&e);
+    }
+    code::OK
+}
+
+/// The machine's UTC offset in minutes, read from the system clock rather than
+/// assumed. Returns None when the platform does not expose it.
+fn local_offset_minutes() -> Option<i32> {
+    Some((local_utc_offset_seconds()? / 60) as i32)
+}
+
+/// Seconds the local clock is ahead of UTC, measured by comparing the system
+/// clock with the same instant formatted without an offset. Reading it beats
+/// assuming one: the scheduler must fire at the operator's wall clock, not at a
+/// hard-coded zone.
+#[cfg(windows)]
+fn local_utc_offset_seconds() -> Option<i64> {
+    // Windows: GetTimeZoneInformation is not reachable without a dependency, so
+    // read the offset the OS exposes through TZ via the standard library's
+    // local-time support instead: `SystemTime` and a civil conversion cannot
+    // expose it, and a silent zero would be a wrong answer. Report unknown and
+    // let `--at` require an explicit offset on Windows.
+    None
+}
+
+#[cfg(not(windows))]
+fn local_utc_offset_seconds() -> Option<i64> {
+    // `date +%z` prints the offset as ±HHMM; parsing it is enough and needs no
+    // crate. If the command or its output is not what we expect, report unknown
+    // rather than invent a value.
+    let out = std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let text = text.trim();
+    let (sign, rest) = match text.split_at(1) {
+        (s, r) if s == "+" => (1i64, r),
+        (s, r) if s == "-" => (-1i64, r),
+        _ => return None,
+    };
+    if rest.len() != 4 {
+        return None;
+    }
+    let hh: i64 = rest[..2].parse().ok()?;
+    let mm: i64 = rest[2..].parse().ok()?;
+    Some(sign * (hh * 3600 + mm * 60))
+}
+
+fn cmd_schedule_list(settings: &Settings, g: &cli::Global) -> i32 {
+    let path = settings.schedule_path.clone();
+    match schedule::Schedule::load(&path) {
+        Ok(q) => {
+            let body =
+                serde_json::to_value(&q).unwrap_or_else(|_| serde_json::json!({"entries": []}));
+            emit(g, &body);
+            code::OK
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            code::FAILED
+        }
+    }
+}
+
+fn cmd_schedule_remove(a: cli::ScheduleRemoveArgs, settings: &Settings) -> i32 {
+    let path = settings.schedule_path.clone();
+    let mut q = match schedule::Schedule::load(&path) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return code::FAILED;
+        }
+    };
+    let before = q.entries.len();
+    q.entries.retain(|e| e.id != a.id);
+    if q.entries.len() == before {
+        eprintln!("error: no entry with id {}", a.id);
+        return code::FAILED;
+    }
+    match q.save(&path) {
+        Ok(()) => {
+            eprintln!("removed {}", a.id);
+            code::OK
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            code::FAILED
+        }
+    }
+}
+
+/// `schedule run` — wait for due entries and send them.
+///
+/// The loop is deliberately dumb: look at the file, sleep until the next due
+/// entry (or a short poll when nothing is due), then claim it. A claimed entry is
+/// written back as `in_flight` **before** the request goes out, which is what
+/// makes a crash mid-flight recoverable rather than a possible double purchase.
+fn cmd_schedule_run(a: cli::ScheduleRunArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    let path = settings.schedule_path.clone();
+    let session = match load_session(settings) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    if !has_any_token(settings, g, &session) {
+        eprintln!(
+            "error: the queue needs a session. Run `sakiyomi auth import-token` or pass --token."
+        );
+        return code::AUTH;
+    }
+    let transport = make_transport(settings, g, &session);
+    let started = std::time::Instant::now();
+
+    loop {
+        if a.max_seconds > 0 && started.elapsed().as_secs() >= a.max_seconds {
+            eprintln!("stopping: --max-seconds elapsed");
+            return code::OK;
+        }
+        let mut q = match schedule::Schedule::load(&path) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return code::FAILED;
+            }
+        };
+        let Some(due) = q.next_due().cloned() else {
+            if a.once {
+                eprintln!("nothing pending");
+                return code::OK;
+            }
+            // Nothing to do: poll the file rather than spin, so a `add` from
+            // another shell is picked up within a few seconds.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        };
+
+        let wait = seconds_until(&due.at);
+        if wait > 0 {
+            if a.once && a.max_seconds == 0 {
+                // Without a deadline, `--once` would sit here forever waiting for
+                // an entry that is not due yet. Say so and stop instead.
+                eprintln!(
+                    "next entry {} is due in {}s at {}; use `run` without --once, or wait",
+                    due.id, wait, due.at
+                );
+                return code::OK;
+            }
+            let sleep = (wait.min(30) as u64).max(1);
+            std::thread::sleep(std::time::Duration::from_secs(sleep));
+            continue;
+        }
+
+        // Claim it: write `in_flight` first, so a crash here leaves a record that
+        // says "this may have been sent" rather than one that invites a retry.
+        if let Some(e) = q.find_mut(&due.id) {
+            e.state = schedule::State::InFlight;
+            e.updated_at = Some(schedule::now_rfc3339());
+            e.note = None;
+        }
+        if let Err(e) = q.save(&path) {
+            eprintln!("error: could not mark {} in flight: {}", due.id, e);
+            return code::FAILED;
+        }
+
+        let req = {
+            let api = Api::new(settings.app_version.clone());
+            api.buy(&due.event, &due.option, due.stake)
+        };
+        eprintln!(
+            "sending {}: {} coins on event {} option {} (scheduled for {})",
+            due.id, due.stake, due.event, due.option, due.at
+        );
+        let outcome =
+            guard::MoneyGuard::new(&transport, req, format!("scheduled buy {}", due.id)).run();
+        let (rc, msg) = outcome.report();
+        let (state, note) = match rc {
+            0 => (schedule::State::Done, shorten(&msg)),
+            code::DECLINED => (
+                schedule::State::Pending,
+                "declined at the prompt".to_string(),
+            ),
+            code::NOT_SENT => (schedule::State::NotSent, shorten(&msg)),
+            code::OUTCOME_UNKNOWN => (schedule::State::InFlight, shorten(&msg)),
+            _ => (schedule::State::Rejected, shorten(&msg)),
+        };
+        println!("[{}] {}", due.id, msg);
+
+        // Re-read before writing: the file may have been edited while the
+        // request was in flight, and overwriting that with a stale copy would
+        // silently drop the other change.
+        let mut fresh = match schedule::Schedule::load(&path) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return code::FAILED;
+            }
+        };
+        if let Some(e) = fresh.find_mut(&due.id) {
+            e.state = state;
+            e.note = Some(note);
+            e.updated_at = Some(schedule::now_rfc3339());
+        }
+        if let Err(e) = fresh.save(&path) {
+            eprintln!("error: could not record the outcome of {}: {}", due.id, e);
+            return code::FAILED;
+        }
+
+        if rc != 0 && rc != code::DECLINED {
+            // A refusal is recorded and not retried. Continue with the rest so
+            // one bad entry does not stall the queue, but report the failure
+            // through the exit code once the loop ends.
+            eprintln!("entry {} ended as {:?} (exit {})", due.id, state, rc);
+        }
+        if a.once {
+            return rc;
+        }
+    }
+}
+
+/// Why a successful round paid nothing, when that is what happened.
+///
+/// The server answers `reward: null` with `today.free_done: true` once the daily
+/// clear has already been paid. Without saying so the whole thing reads like the
+/// coins went missing, which is exactly how it was reported.
+fn no_payout_note(msg: &str) -> Option<String> {
+    let body = msg.strip_prefix("ok: ")?;
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let cleared = v.get("cleared").and_then(|c| c.as_bool()).unwrap_or(false);
+    let paid = v.get("reward").map(|r| !r.is_null()).unwrap_or(false);
+    if !cleared || paid {
+        return None;
+    }
+    let free_done = v
+        .get("today")
+        .and_then(|t| t.get("free_done"))
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
+    let coins = v
+        .get("today")
+        .and_then(|t| t.get("coins"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(0);
+    let free_coins = v.get("free_coins").and_then(|c| c.as_u64()).unwrap_or(0);
+    if free_done {
+        Some(format!(
+            "cleared, but today's free clear is already paid ({} coins today, {} per day). The next clear that pays is tomorrow (JST).",
+            coins, free_coins
+        ))
+    } else {
+        Some(format!(
+            "cleared, but the server paid nothing this round (free_coins {} was not granted)",
+            free_coins
+        ))
+    }
+}
+
+fn shorten(s: &str) -> String {
+    // Keep the whole message: a truncated failure reason is worse than a long
+    // line, and the "no truncation" rule applies to what is written for a human.
+    s.replace('\n', " ")
+}
+
+fn seconds_until(at: &str) -> i64 {
+    match schedule::unix_from_rfc(at) {
+        Ok(t) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            t - now
+        }
+        Err(_) => 0,
+    }
+}
+
+fn cmd_schedule_reconcile(
+    a: cli::ScheduleReconcileArgs,
+    settings: &Settings,
+    g: &cli::Global,
+) -> i32 {
+    if a.done == a.retry {
+        eprintln!("error: pass exactly one of --done or --retry");
+        return code::USAGE;
+    }
+    let path = settings.schedule_path.clone();
+    let mut q = match schedule::Schedule::load(&path) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return code::FAILED;
+        }
+    };
+    let now = schedule::now_rfc3339();
+    let Some(entry) = q.find_mut(&a.id) else {
+        eprintln!("error: no entry with id {}", a.id);
+        return code::FAILED;
+    };
+    entry.state = if a.done {
+        schedule::State::Done
+    } else {
+        schedule::State::NotSent
+    };
+    entry.note = Some(if a.done {
+        "settled by hand as done".to_string()
+    } else {
+        "settled by hand as retryable".to_string()
+    });
+    entry.updated_at = Some(now);
+    match q.save(&path) {
+        Ok(()) => {
+            let body = serde_json::to_value(&q).unwrap_or_else(|_| serde_json::json!({}));
+            emit(g, &body);
+            code::OK
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            code::FAILED
+        }
+    }
+}
+
+fn emit_entry(e: &schedule::Entry) {
+    let body = serde_json::to_value(e).unwrap_or_else(|_| serde_json::json!({}));
+    println!("{}", output::to_json(&body));
+}
 
 /// Shared gate for every money-moving command.
 fn money_action(
@@ -1067,11 +1569,12 @@ fn ask(what: &str, detail: &str) -> bool {
 }
 
 fn cmd_buy(a: cli::BuyArgs, settings: &Settings, g: &cli::Global) -> i32 {
-    if a.stake == 0 {
-        // A zero-point purchase is not a purchase; the app's own stake picker
-        // has no zero entry. Rejecting here keeps the estimate honest too
-        // (shares would be 0 and the request would spend nothing).
-        eprintln!("error: --stake must be greater than 0");
+    // The server accepts 10..=100_000 and refuses the rest with
+    // 「コインは10〜100,000の範囲で入力してください」(measured on 2026-11-27).
+    if !(10..=100_000).contains(&a.stake) {
+        eprintln!(
+            "error: --stake must be between 10 and 100000 (the server refuses anything else)"
+        );
         return code::USAGE;
     }
     let req = {
@@ -1120,7 +1623,7 @@ fn cmd_buy(a: cli::BuyArgs, settings: &Settings, g: &cli::Global) -> i32 {
         eprintln!("dry-run: nothing was sent");
         return code::OK;
     }
-    let detail = format!("{} x {} points on event {}", a.option, a.stake, a.event);
+    let detail = format!("{} x {} coins on event {}", a.option, a.stake, a.event);
     money_action(settings, g, req, &format!("buy into {}", a.event), &detail)
 }
 

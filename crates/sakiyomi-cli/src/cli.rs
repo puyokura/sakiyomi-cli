@@ -47,6 +47,11 @@ pub struct Global {
     #[arg(long, global = true, value_name = "PATH")]
     pub state: Option<std::path::PathBuf>,
 
+    /// Schedule file path. Overrides SAKIYOMI_SCHEDULE and the OS default
+    /// (`schedule.json` beside the session file).
+    #[arg(long, global = true, value_name = "PATH")]
+    pub schedule: Option<std::path::PathBuf>,
+
     /// Request timeout in seconds.
     #[arg(long, global = true, value_name = "SECS")]
     pub timeout: Option<u64>,
@@ -75,6 +80,7 @@ impl Global {
             token: self.token.clone(),
             config: self.config.clone(),
             state: self.state.clone(),
+            schedule: self.schedule.clone(),
             timeout_secs: self.timeout,
         }
     }
@@ -167,6 +173,70 @@ pub enum Command {
     /// Create a quiz (POST /quizzes) and inspect the ones you created.
     #[command(subcommand)]
     Quiz(QuizCmd),
+
+    /// Queue a purchase to be sent at a specific time, and run the queue.
+    #[command(subcommand)]
+    Schedule(ScheduleCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScheduleCmd {
+    /// Queue one purchase. Saved to a file; nothing is sent until `run`.
+    Add(ScheduleAddArgs),
+    /// Show the queue.
+    List,
+    /// Drop an entry from the queue (nothing is sent either way).
+    Remove(ScheduleRemoveArgs),
+    /// Wait for due entries and send them. This is the process that stays resident.
+    Run(ScheduleRunArgs),
+    /// Clear the `in_flight`/`not_sent` marks after you have checked by hand.
+    Reconcile(ScheduleReconcileArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleAddArgs {
+    /// When to buy, e.g. 2026-12-01T12:00+09:00. Without an offset it is read as
+    /// local time. Stored as UTC, so the queue is unambiguous.
+    #[arg(long, value_name = "TIME")]
+    pub at: String,
+    /// Event id.
+    #[arg(long)]
+    pub event: String,
+    /// Option id.
+    #[arg(long)]
+    pub option: String,
+    /// Coins to stake. The server debits coins, not points, and the
+    /// request carries no currency field (bundle 665770).
+    #[arg(long, value_name = "COINS")]
+    pub stake: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleRemoveArgs {
+    /// Entry id, from `schedule list`.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleRunArgs {
+    /// Stop once nothing is pending instead of waiting for more.
+    #[arg(long)]
+    pub once: bool,
+    /// Stop after this many seconds even if entries remain. 0 means no limit.
+    #[arg(long, default_value = "0", value_name = "SECS")]
+    pub max_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct ScheduleReconcileArgs {
+    /// Entry id to settle.
+    pub id: String,
+    /// Record it as done (the server did take the points).
+    #[arg(long)]
+    pub done: bool,
+    /// Record it as not sent again, so `run` will retry it.
+    #[arg(long)]
+    pub retry: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -493,7 +563,8 @@ pub struct BuyArgs {
     /// Option id.
     #[arg(long)]
     pub option: String,
-    /// Points to stake.
+    /// Coins to stake. Measured: the server debits coins, not points, and
+    /// the request carries no currency field (bundle 665770).
     #[arg(long)]
     pub stake: u64,
 }

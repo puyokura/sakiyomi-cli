@@ -109,6 +109,20 @@
 - **`GET /quizzes/mine` の応答（実測）**。`{quizzes: [...]}` を返し、各要素に `status`
   （pending / approved / rejected）、`review_note`、`event_id`、`bonus_coins` が含まれる。
   サーバー側で絞り込みはしないので、`quiz list --status` は CLI 側でフィルタする。
+- **`buy` は `coins` を引く（実測で訂正）**。`POST /events/{id}/buy` の body は
+  `{option_id, stake}` のみで通貨の指定が無く（バンドル 665770）、サーバーは
+  `coins` から引く。実測: stake 10 の買付で `ledger?currency=coin` に `buy -10` が入り、
+  `ledger?currency=point` は変化せず、`me` の `points` は 470 のまま `coins` が 150→40 になった
+  （同時刻に別の買付 100 も走ったため 40）。CLI の `--stake` 説明を「ポイント」から
+  「コイン」に訂正した。
+- **`stake` の許容範囲は 10〜100,000（実測）**。範囲外は HTTP 400
+  `コインは10〜100,000の範囲で入力してください`。`buy` と `schedule add` の両方で
+  同じ境界を事前検査する（exit 2）。
+- **ミニゲームの「今日の受取」は `/ads/reward` に出ない**。`used_today` は広告の本数で、
+  ミニゲームのクリア回数ではない。ミニゲームの当日分は `finish` の応答の `today` と、
+  台帳の `reason=minigame`（JST の日付で集計）でのみ確認できる。`wave status` は
+  この 2 系統を `ads` と `minigame` に分けて返す。同日 2 回目のクリアが `reward: null` に
+  なるのは正常で、`wave play` はその旨を stderr に注記する。
 ## 3. 金銭操作の安全弁（実測）
 
 `--dry-run` はネットワーク I/O をしない。閉じたポートを base にしても exit 0 で送信内容を表示する。
