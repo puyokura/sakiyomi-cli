@@ -194,6 +194,7 @@ sakiyomi me                                       # 自分のアカウント（�
 
 sakiyomi events list                              # 一覧（30 件 + next_ids）
 sakiyomi events list --ids 44909,6663              # 指定 ID だけ（50 件超は自動で分割）
+sakiyomi events list --stake 100                   # 各選択肢に buy_prob / shares を併記
 sakiyomi events list --trial                      # trial_ui=1 を付ける
 sakiyomi events show 44909                        # 1 件の詳細（{event, series}）
 sakiyomi events history 44909                     # 確率の推移（既定 1w。--period 1d/1m/all）
@@ -204,6 +205,8 @@ sakiyomi events subcategories soccer              # サブカテゴリ
 
 sakiyomi positions list                           # 自分のポジション（要ログイン）
 sakiyomi positions list --tab result              # タブ指定（active / result）
+sakiyomi quiz list                                # 自分のクイズと審査状況
+sakiyomi quiz list --status approved              # 採用済みだけ
 sakiyomi positions claim <position_id>            # 的中分の払い戻しを受け取る
 sakiyomi positions claim all                      # 未受取の won をまとめて受け取る
 sakiyomi missions list                            # ミッション（未認証でも読める）

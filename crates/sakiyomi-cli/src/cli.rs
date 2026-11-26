@@ -164,8 +164,24 @@ pub enum Command {
     #[command(subcommand)]
     Wave(WaveCmd),
 
+    /// Create a quiz (POST /quizzes) and inspect the ones you created.
+    #[command(subcommand)]
+    Quiz(QuizCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QuizCmd {
     /// Create a quiz (POST /quizzes). Points move only if it is adopted.
-    Quiz(QuizArgs),
+    Create(QuizArgs),
+    /// Your own quizzes and their review status (GET /quizzes/mine).
+    List(QuizListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct QuizListArgs {
+    /// Only show quizzes in this review state: pending, approved or rejected.
+    #[arg(long)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -322,6 +338,12 @@ pub struct EventsListArgs {
     /// appends when the account is in trial mode (bundle 500857-500870).
     #[arg(long)]
     pub trial: bool,
+    /// Add a `buy_prob` and `shares` field to every option, computed for this
+    /// stake. The listing `prob` is the current weight share; what a purchase
+    /// would actually pay also folds the stake itself into the fraction, so the
+    /// two differ by design. Comparing candidates needs one fixed stake.
+    #[arg(long, value_name = "POINTS")]
+    pub stake: Option<u64>,
 }
 
 #[derive(Debug, Args)]

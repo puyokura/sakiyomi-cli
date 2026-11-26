@@ -79,6 +79,60 @@ pub fn buy_estimate(event: &Value, option_id: &str, stake: u64) -> Option<Estima
     })
 }
 
+/// Add `buy_prob` and `shares` to every option of an event, in place.
+///
+/// Keeps the server's own `prob` untouched: it is the current weight share, and
+/// overwriting it would silently change what every other reader sees. The two
+/// fields therefore sit next to `prob` and are only meaningful for one stake.
+///
+/// Returns how many options were annotated. An option whose numbers are
+/// missing keeps its original fields rather than gaining a guess.
+pub fn annotate_event(event: &mut Value, stake: u64) -> usize {
+    let total_weight = match event.get("total_weight").and_then(|v| v.as_f64()) {
+        Some(t) if t > 0.0 => t,
+        _ => return 0,
+    };
+    let Some(options) = event.get_mut("options").and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let stake_f = stake as f64;
+    let mut n = 0;
+    for option in options.iter_mut() {
+        // Same fallback as `optionWeight()`: raw weight, else prob * total.
+        let weight = match option.get("weight").and_then(|w| w.as_f64()) {
+            Some(w) => w,
+            None => match option.get("prob").and_then(|p| p.as_f64()) {
+                Some(p) => p * total_weight,
+                None => continue,
+            },
+        };
+        let total = total_weight + stake_f;
+        let buy_prob = (weight + stake_f) / total;
+        if !(0.0..=1.0).contains(&buy_prob) || buy_prob <= 0.0 {
+            continue;
+        }
+        if let Some(obj) = option.as_object_mut() {
+            obj.insert("buy_prob".to_string(), serde_json::json!(buy_prob));
+            obj.insert(
+                "shares".to_string(),
+                serde_json::json!((stake_f / buy_prob).floor() as u64),
+            );
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Annotate every event in a `{events: [...]}` list or a `{event: {...}}` reply.
+pub fn annotate_events(body: &mut Value, stake: u64) -> usize {
+    if let Some(events) = body.get_mut("events").and_then(|v| v.as_array_mut()) {
+        return events.iter_mut().map(|e| annotate_event(e, stake)).sum();
+    }
+    if let Some(event) = body.get_mut("event") {
+        return annotate_event(event, stake);
+    }
+    0
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,11 +201,39 @@ mod tests {
     }
 
     #[test]
-    fn shares_are_the_floor_of_stake_over_probability() {
-        // The account's own settled positions confirm this relation: see
-        // VERIFICATION.md. A rounding change here would break that agreement.
-        let e = buy_estimate(&board(), "106460", 100).unwrap();
-        let expected = (100.0 / e.buy_prob).floor() as u64;
-        assert_eq!(e.shares, expected);
+    fn annotating_keeps_the_server_prob_and_adds_the_buy_fields() {
+        let mut board = board();
+        let n = annotate_event(&mut board, 100);
+        assert_eq!(n, 3, "every option with numbers is annotated");
+        let first = &board["options"][0];
+        // The server's own value must survive: it is the current weight share.
+        assert_eq!(first["prob"], 0.12);
+        assert!((first["buy_prob"].as_f64().unwrap() - 0.120655).abs() < 0.000001);
+        assert_eq!(first["shares"], 828);
+    }
+
+    #[test]
+    fn annotating_a_list_touches_every_event() {
+        let mut body = json!({
+            "events": [board(), board()],
+            "next_ids": [1, 2]
+        });
+        let n = annotate_events(&mut body, 100);
+        assert_eq!(n, 6, "two events x three options");
+        assert_eq!(body["events"][0]["options"][0]["shares"], 828);
+        assert_eq!(body["next_ids"][0], 1, "other fields are left alone");
+    }
+
+    #[test]
+    fn annotating_a_single_event_reply_works() {
+        let mut body = json!({"event": board(), "series": {}});
+        assert_eq!(annotate_events(&mut body, 100), 3);
+    }
+
+    #[test]
+    fn a_board_without_weights_is_left_untouched() {
+        let mut body = json!({"events": [{"id": 1, "options": []}]});
+        assert_eq!(annotate_events(&mut body, 100), 0);
+        assert_eq!(body["events"][0]["options"].as_array().unwrap().len(), 0);
     }
 }

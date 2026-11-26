@@ -266,7 +266,9 @@ fn tool_definitions() -> Vec<Value> {
             "List prediction events (GET /events).",
             json!({"type":"object","properties":{
                 "ids": {"type":"array","items":{"type":"string"},
-                        "description":"Optional event ids to fetch instead of the full list."}
+                        "description":"Optional event ids to fetch instead of the full list."},
+                "stake": {"type":"integer",
+                          "description":"Add buy_prob and shares to every option, for this stake."}
             }}),
         ),
         tool(
@@ -463,7 +465,52 @@ fn call_tool(
                     .filter_map(|x| x.as_str().map(|s| s.to_string()))
                     .collect()
             });
-            Ok(fetch(&transport, &api.events(ids.as_deref(), false)))
+            let stake = args.get("stake").and_then(|v| v.as_u64());
+
+            // The server takes at most 50 ids per request, so a longer list is
+            // split the same way the CLI splits it; only the merged answer is
+            // returned, and it is annotated once at the end.
+            let mut merged: Vec<serde_json::Value> = Vec::new();
+            let mut shape: Option<serde_json::Value> = None;
+            let mut batches: Vec<&[String]> = Vec::new();
+            match ids.as_deref() {
+                None => batches.push(&[]),
+                Some(list) if list.len() <= 50 => batches.push(list),
+                Some(list) => batches.extend(list.chunks(50)),
+            }
+            for chunk in batches {
+                let req = if chunk.is_empty() {
+                    api.events(None, false)
+                } else {
+                    api.events(Some(chunk), false)
+                };
+                match transport.send(&req) {
+                    Ok(r) if (200..300).contains(&r.status) => {
+                        if let Some(list) = r.body.get("events").and_then(|v| v.as_array()) {
+                            merged.extend(list.iter().cloned());
+                        }
+                        if shape.is_none() {
+                            shape = Some(r.body);
+                        }
+                    }
+                    Ok(r) => {
+                        return Ok(error_result(format!(
+                            "batch failed: HTTP {}\n{}",
+                            r.status,
+                            crate::output::to_json(&r.body)
+                        )))
+                    }
+                    Err(e) => return Ok(error_result(format!("batch failed: {}", e))),
+                }
+            }
+            let mut body = shape.unwrap_or_else(|| serde_json::json!({ "events": [] }));
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("events".to_string(), serde_json::Value::Array(merged));
+            }
+            if let Some(stake) = stake {
+                crate::estimate::annotate_events(&mut body, stake);
+            }
+            Ok(text_result(crate::output::to_json(&body)))
         }
         "event_history" => {
             let id = str_arg(args, "id")?;

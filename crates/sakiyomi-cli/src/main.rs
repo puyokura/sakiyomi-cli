@@ -93,7 +93,7 @@ fn run(cli: Cli) -> i32 {
         Command::GiftExchange(a) => cmd_gift_exchange(a, &settings, &cli.global),
         Command::Bonus(c) => cmd_bonus(c, &settings, &cli.global),
         Command::Wave(c) => cmd_wave(c, &settings, &cli.global),
-        Command::Quiz(a) => cmd_quiz(a, &settings, &cli.global),
+        Command::Quiz(c) => cmd_quiz(c, &settings, &cli.global),
     }
 }
 
@@ -377,11 +377,17 @@ const MAX_IDS_PER_REQUEST: usize = 50;
 /// returns beyond `events` (today only `next_ids`, and only on a full-list call)
 /// is carried over from the first response so the paging contract is unchanged.
 fn cmd_events_list(a: cli::EventsListArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if a.stake == Some(0) {
+        eprintln!("error: --stake must be greater than 0");
+        return code::USAGE;
+    }
     if a.ids.is_empty() {
-        return read(settings, g, |api| api.events(None, a.trial));
+        return read_annotated(settings, g, a.stake, |api| api.events(None, a.trial));
     }
     if a.ids.len() <= MAX_IDS_PER_REQUEST {
-        return read(settings, g, |api| api.events(Some(&a.ids), a.trial));
+        return read_annotated(settings, g, a.stake, |api| {
+            api.events(Some(&a.ids), a.trial)
+        });
     }
     if g.dry_run {
         // Show what each batch would send, because a preview of one request
@@ -447,8 +453,47 @@ fn cmd_events_list(a: cli::EventsListArgs, settings: &Settings, g: &cli::Global)
     if let Some(obj) = out.as_object_mut() {
         obj.insert("events".to_string(), serde_json::Value::Array(merged));
     }
+    if let Some(stake) = a.stake {
+        // Annotated after the merge so the split is invisible to the caller:
+        // every option gets the same fields no matter how many batches it took.
+        estimate::annotate_events(&mut out, stake);
+    }
     emit(g, &out);
     code::OK
+}
+
+/// `read`, plus the per-option buy estimate when `--stake` was given.
+fn read_annotated<F>(settings: &Settings, g: &cli::Global, stake: Option<u64>, build: F) -> i32
+where
+    F: FnOnce(&Api) -> WireRequest,
+{
+    // `perform_with(.., false)` keeps the first body from being printed: the
+    // caller prints the annotated document once, at the end.
+    let api = Api::new(settings.app_version.clone());
+    let req = build(&api);
+    if g.dry_run {
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        print!(
+            "{}",
+            guard::describe(&req, transport.base(), session.token())
+        );
+        return code::OK;
+    }
+    let (rc, body) = perform_with(settings, g, &req, false);
+    if rc != code::OK {
+        return rc;
+    }
+    let Some(mut body) = body else {
+        return rc;
+    };
+    // Printing is suppressed above in every case, so it happens here whether or
+    // not an estimate was asked for; returning early would print nothing at all.
+    if let Some(stake) = stake {
+        estimate::annotate_events(&mut body, stake);
+    }
+    emit(g, &body);
+    rc
 }
 
 fn cmd_events(c: cli::EventsCmd, settings: &Settings, g: &cli::Global) -> i32 {
@@ -836,7 +881,68 @@ fn cmd_wave_play(a: cli::WavePlayArgs, settings: &Settings, g: &cli::Global) -> 
 /// Options and their probabilities come in as repeated flags, so they are paired
 /// here rather than in the CLI layer: a probability without a matching option is
 /// a usage error, not something to guess at.
-fn cmd_quiz(a: cli::QuizArgs, settings: &Settings, g: &cli::Global) -> i32 {
+fn cmd_quiz(c: cli::QuizCmd, settings: &Settings, g: &cli::Global) -> i32 {
+    match c {
+        cli::QuizCmd::List(a) => cmd_quiz_list(a, settings, g),
+        cli::QuizCmd::Create(a) => cmd_quiz_create(a, settings, g),
+    }
+}
+
+/// `quiz list` — the caller's own quizzes with their review state.
+///
+/// The server returns every quiz the account has submitted, including the
+/// reviewer's note and whether it was adopted (which is what decides the bonus).
+/// It does no filtering, so `--status` filters here rather than in the request.
+fn cmd_quiz_list(a: cli::QuizListArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if let Some(s) = a.status.as_deref() {
+        if !matches!(s, "pending" | "approved" | "rejected") {
+            eprintln!("error: --status must be pending, approved or rejected");
+            return code::USAGE;
+        }
+    }
+    let list_req = {
+        let api = Api::new(settings.app_version.clone());
+        api.quizzes_mine()
+    };
+    if g.dry_run {
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        print!(
+            "{}",
+            guard::describe(&list_req, transport.base(), session.token())
+        );
+        eprintln!("dry-run: nothing was sent");
+        return code::OK;
+    }
+    // The filtered result is printed once, at the end, so an unfiltered body
+    // never appears in front of the filtered one.
+    let (rc, body) = perform_with(settings, g, &list_req, false);
+    if rc != code::OK {
+        return rc;
+    }
+    let Some(mut body) = body else {
+        return code::FAILED;
+    };
+    if let Some(want) = a.status.as_deref() {
+        let kept: Vec<serde_json::Value> = body
+            .get("quizzes")
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|q| q.get("status").and_then(|s| s.as_str()) == Some(want))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("quizzes".to_string(), serde_json::Value::Array(kept));
+        }
+    }
+    emit(g, &body);
+    code::OK
+}
+
+fn cmd_quiz_create(a: cli::QuizArgs, settings: &Settings, g: &cli::Global) -> i32 {
     if a.options.len() < 2 {
         eprintln!("error: at least two --option values are required");
         return code::USAGE;
@@ -961,6 +1067,13 @@ fn ask(what: &str, detail: &str) -> bool {
 }
 
 fn cmd_buy(a: cli::BuyArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    if a.stake == 0 {
+        // A zero-point purchase is not a purchase; the app's own stake picker
+        // has no zero entry. Rejecting here keeps the estimate honest too
+        // (shares would be 0 and the request would spend nothing).
+        eprintln!("error: --stake must be greater than 0");
+        return code::USAGE;
+    }
     let req = {
         let api = Api::new(settings.app_version.clone());
         api.buy(&a.event, &a.option, a.stake)

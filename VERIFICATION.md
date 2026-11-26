@@ -85,6 +85,21 @@
   手持ちの確定ポジション 5 件で `floor(stake / buy_prob)` が記録 `shares` と 5/5 一致した。
   `buy_prob` 自体は買付時点の値なので、後から盤面を読み直して再計算すると一致しない
   （重みが動くため）。`--dry-run` の推定は「いま買ったら」の値であって記録値の再現ではない。
+- **一覧の `prob` は `weight / total_weight` そのもの（実測）**。125 イベント・81 選択肢を
+  走査して、`prob` と `weight/total_weight` が 0.0005 を超えてずれる選択肢は 0 件だった。
+  したがって「一覧の `prob` は seed floor 込みで買付時の `buy_prob` とは別物」という理解は
+  誤りである。差が出るのは `buy_prob = (weight + stake) / (total_weight + stake)` の
+  分母分子に **stake 自身が入る**ためで、stake を大きくすると必ず上昇する
+  （例: event 32600 / opt 47276、`prob` 0.562 の選択肢が stake 1835 で 0.6154 になる）。
+  一覧で候補を比べるときは stake を固定する必要があり、`events list --stake N` が
+  各選択肢へ `buy_prob` と `shares` を併記する（`prob` は書き換えない）。
+- **`prob` の合計が 1 を超えるイベントが実在する（実測）**。125 件中 4 件
+  （5706 は 1.287、54742 は 1.164）で合計が 1 を超える。`weight` の合計が `total_weight` を
+  上回っており、買付見積りはそのままの式で計算できるが、`prob` を確率として解釈すると
+  矛盾して見える。CLI は値をそのまま返し、丸めたり正規化したりはしない。
+- **`GET /quizzes/mine` の応答（実測）**。`{quizzes: [...]}` を返し、各要素に `status`
+  （pending / approved / rejected）、`review_note`、`event_id`、`bonus_coins` が含まれる。
+  サーバー側で絞り込みはしないので、`quiz list --status` は CLI 側でフィルタする。
 ## 3. 金銭操作の安全弁（実測）
 
 `--dry-run` はネットワーク I/O をしない。閉じたポートを base にしても exit 0 で送信内容を表示する。
