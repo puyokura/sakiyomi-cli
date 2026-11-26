@@ -281,7 +281,22 @@ AdMob のサーバー側検証（SSV）コールバックが行う。アプリ�
 CLI から出せるのは nonce を付けた GET だけで、それでは付与されない。
 
 実測で確かめた。`nonce` / `win_event` / `mg_play` を付けて何度叩いても
-`used_today` は 0 のまま、コイン残高も動かない。`POST /ads/reward` は 404。
+`used_today` は 0 のまま、コイン残高も動かない。`POST`・`PUT`・`PATCH` は
+`/ads/reward` に対してすべて 404 で、付与の窓口は API 空間に存在しない。
+
+SSV の受け口は `https://sakiyomi.app/ads/ssv` にあり、クエリ無しなら 200 `ok`、
+パラメータを 1 つでも付けると 403 `forbidden` になる。認証ヘッダを付けても 403 で、
+なりすませない。アプリが載せる `customData` は `wb` / `lb` / `mg` + `x` +
+`randomUUID()` で、**署名もトークンも含まない**。視聴の証明は Google が署名で行い、
+その検証鍵はサーバー側にしかない。
+
+一方、アプリで実際に広告を最後まで再生すると付与は起きる（実測）:
+
+```
+前: used_today=0 remaining=5 coins=30
+後: used_today=1 remaining=4 coins=40
+台帳: video delta=10
+```
 
 したがって `bonus status` は「今いくらもらえるか」を読むだけのコマンドで、
 受け取りはしない。アプリで広告を再生する必要がある。
