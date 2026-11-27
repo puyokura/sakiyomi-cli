@@ -299,7 +299,33 @@ SSV の受け口は `https://sakiyomi.app/ads/ssv` にあり、クエリ無し�
 ```
 
 したがって `bonus status` は「今いくらもらえるか」を読むだけのコマンドで、
-受け取りはしない。アプリで広告を再生する必要がある。
+受け取りはしない。API だけで付与を作る経路は存在しない。
+
+ただし **UI 操作を自動化して本物の広告を再生すれば付与は通る**（実測）。
+`adb input tap` と `sleep` だけで、人手も画面も使わずに 4 本連続で受け取れた。
+
+```bash
+adb shell am start -n app.sakiyomi.mobile/.MainActivity; sleep 14
+adb shell input tap 270 1559   # ためる
+sleep 7
+adb shell input tap 754 1238   # 見る（動画視聴）
+sleep 150                      # 再生完了を待つ
+adb shell input tap 852 48     # Close（右上）
+```
+
+座標は 900x1600 の画面で測った値。`uiautomator dump` から
+`bounds="[726,1217][782,1259]"`（見る）と `bounds="[828,24][876,72]"`（Close）を
+動的に取れるので、固定値に頼らず実装できる。実測の推移:
+
+```
+開始: coins=0   used_today=1  remaining=4
+ 4本: coins=40  used_today=5  remaining=0   台帳に video +10 が 4 件
+```
+
+早送りはできない。再生中に `KEYCODE_BACK` を送っても広告は閉じず、完了時に
+付与された。在庫切れのときは `Ad failed to load : 3`（`ERROR_CODE_NO_FILL`）が
+返り、`見る` を押しても広告が開かない（待つと回復する）。再生には 90〜150 秒
+かかるので、30 秒で判定すると取り違える。
 
 ### ミニゲームのコイン
 
