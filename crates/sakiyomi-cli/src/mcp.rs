@@ -747,7 +747,7 @@ fn call_tool(
             .run()
             .report();
             Ok(if code == 0 {
-                text_result(msg)
+                text_result(crate::strip_video_from_report(&msg))
             } else {
                 error_result(msg)
             })

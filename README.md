@@ -255,7 +255,9 @@ sakiyomi claim <mission_id>              # ミッション報酬を受け取る
 
 広告の本数・広告ユニット・視聴の成否は出さない。CLI は広告を出せないので、
 出しても読めない値になる。`wave status` は同じ内容に、ミニゲームの当日分を
-台帳から集計した `minigame` を足して返す。
+台帳から集計した `minigame` を足して返す。`wave play` の応答からも動画ボーナスの
+項目（`video` / `video_coins` / `video_max` / `daily_cap` / `today.video_done`）は
+落としている。
 
 ### デイリーボーナス
 

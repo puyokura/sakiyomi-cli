@@ -130,6 +130,9 @@ jobs:
               視聴の成否、勝利後の動画ボーナス、ミニゲーム後の動画ボーナスを
               返さなくなりました。CLI は広告を出せないので、出しても読めない値になります。
               残るのはログインボーナスと、ミニゲームの当日分（台帳から集計）です。
+            - `wave play` の応答からも動画ボーナスの項目（`video` / `video_coins` /
+              `video_max` / `daily_cap` / `today.video_done` / `today.next`）を
+              落としました。ミニゲームのクリア分（`free_coins`）はそのまま残ります。
             - `bonus status` の `--mg_play` を削除しました。動画ボーナスを問い合わせる
               ためだけの引数でした。MCP の `bonus_status` からも外しています。
             - `wave status` の `minigame.entries` を JST で返すようにしました。集計は

@@ -1009,7 +1009,10 @@ fn cmd_wave_play(a: cli::WavePlayArgs, settings: &Settings, g: &cli::Global) -> 
     };
     let outcome = guard::MoneyGuard::new(&transport, finish, "finish one wave round").run();
     let (rc, msg) = outcome.report();
-    println!("{}", msg);
+    // The reply carries the video bonus the app would offer next. That is the
+    // same rewarded ad this client cannot show, so its figures are removed
+    // before printing; `no_payout_note` still reads them out of the raw text.
+    println!("{}", strip_video_from_report(&msg));
     // A cleared round that pays nothing is the normal second clear of the day.
     // Say why, so it does not read as a failure. The text after "ok: " is the
     // response body, which is the only place the round's own day counter lives.
@@ -1449,6 +1452,39 @@ fn cmd_schedule_run(a: cli::ScheduleRunArgs, settings: &Settings, g: &cli::Globa
     }
 }
 
+/// Remove the video-ad figures from a `finish` report before printing it.
+///
+/// The reply is prefixed with `ok: `, so the body is parsed out, stripped and
+/// re-rendered. Anything that does not parse is returned unchanged rather than
+/// mangled: a failure message must reach the caller intact.
+pub(crate) fn strip_video_from_report(msg: &str) -> String {
+    let Some(body) = msg.strip_prefix("ok: ") else {
+        return msg.to_string();
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return msg.to_string();
+    };
+    const VIDEO_KEYS: [&str; 5] = [
+        "video",
+        "video_received",
+        "video_coins",
+        "video_max",
+        "daily_cap",
+    ];
+    if let Some(obj) = v.as_object_mut() {
+        for key in VIDEO_KEYS {
+            obj.remove(key);
+        }
+        // `today` mixes the free clear (a minigame figure) with `video_done`
+        // and `next`, which describe the ad.
+        if let Some(today) = obj.get_mut("today").and_then(|t| t.as_object_mut()) {
+            today.remove("video_done");
+            today.remove("next");
+        }
+    }
+    format!("ok: {}", crate::output::to_json(&v))
+}
+
 /// Why a successful round paid nothing, when that is what happened.
 ///
 /// The server answers `reward: null` with `today.free_done: true` once the daily
@@ -1824,6 +1860,40 @@ mod tests {
         assert_eq!(obj["login_bonus"]["available"], true);
         // The login bonus is the only non-ad bonus in this reply.
         assert_eq!(obj.len(), 2, "only the login fields remain");
+    }
+
+    #[test]
+    fn the_finish_report_loses_the_video_figures() {
+        let raw = r#"ok: {"play_id": 1, "cleared": true, "reward": null, "video": {"coins": 10}, "video_received": false, "video_coins": 10, "video_max": 2, "daily_cap": 40, "free_coins": 20, "today": {"free_done": true, "video_done": 0, "coins": 20, "next": "video"}}"#;
+        let out = strip_video_from_report(raw);
+        let body: serde_json::Value =
+            serde_json::from_str(out.strip_prefix("ok: ").unwrap()).unwrap();
+        let obj = body.as_object().unwrap();
+        for gone in [
+            "video",
+            "video_received",
+            "video_coins",
+            "video_max",
+            "daily_cap",
+        ] {
+            assert!(!obj.contains_key(gone), "{} should be gone", gone);
+        }
+        let today = obj["today"].as_object().unwrap();
+        assert!(!today.contains_key("video_done"));
+        assert!(!today.contains_key("next"));
+        // The minigame's own figures stay.
+        assert_eq!(obj["free_coins"], 20);
+        assert_eq!(today["coins"], 20);
+        assert_eq!(today["free_done"], true);
+    }
+
+    #[test]
+    fn a_failure_message_reaches_the_caller_intact() {
+        // Only `ok: ` payloads are rewritten; a rejection keeps its text.
+        let raw = "rejected by the server: ... -> HTTP 409";
+        assert_eq!(strip_video_from_report(raw), raw);
+        let broken = "ok: {not json";
+        assert_eq!(strip_video_from_report(broken), broken);
     }
 
     #[test]
