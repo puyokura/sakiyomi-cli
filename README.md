@@ -301,8 +301,9 @@ SSV の受け口は `https://sakiyomi.app/ads/ssv` にあり、クエリ無し�
 したがって `bonus status` は「今いくらもらえるか」を読むだけのコマンドで、
 受け取りはしない。API だけで付与を作る経路は存在しない。
 
-ただし **UI 操作を自動化して本物の広告を再生すれば付与は通る**（実測）。
-`adb input tap` と `sleep` だけで、人手も画面も使わずに 4 本連続で受け取れた。
+**エミュレータ（または実機）の上でアプリを動かす必要はある。** ただし画面を
+見ずに操作は自動化できる。`adb input tap` と `sleep` だけで、人手も画面も
+使わずに 4 本連続で受け取れた（実測）。
 
 ```bash
 adb shell am start -n app.sakiyomi.mobile/.MainActivity; sleep 14
@@ -321,6 +322,19 @@ adb shell input tap 852 48     # Close（右上）
 開始: coins=0   used_today=1  remaining=4
  4本: coins=40  used_today=5  remaining=0   台帳に video +10 が 4 件
 ```
+
+エミュレータを一切使わずに広告を再生する方法は無い（実測）。広告ユニットを Web
+形式で叩くと空の HTML が返り配信されない。付与は Google の SSV 署名をサーバーが
+検証して行うが、`/ads/ssv` はクエリ無しなら 200、何か付けると 403 `forbidden` で、
+偽の署名では通らない。そして Android アプリのプロセスを動かす手段がこの環境には
+他に無い（`adb devices` は MuMu のみ、WSA・WSL のディストロ・Android SDK の
+いずれも未導入、USB 実機も無し）。
+
+代わりに **オファーウォール**（`GET /api/offerwall`）という Web で完結する獲得経路が
+ある。4 社（zucks / smaad / skyflag / ratel）の URL を返し、いずれもブラウザで
+開ける。skyflag には実案件が並ぶ（例: アプリを入れてレベルを上げると最大
+118,035 コイン）。ただし案件は人間の操作が前提で、ヘッドレスで自動化できるのは
+閲覧まで。この経路での付与実績はまだ無い（台帳に該当する reason が無い）。
 
 早送りはできない。再生中に `KEYCODE_BACK` を送っても広告は閉じず、完了時に
 付与された。在庫切れのときは `Ad failed to load : 3`（`ERROR_CODE_NO_FILL`）が
