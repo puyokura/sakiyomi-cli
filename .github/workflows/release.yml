@@ -108,20 +108,14 @@ jobs:
         with:
           path: assets
           merge-multiple: true
-      - name: checksums
-        shell: bash
-        run: |
-          cd assets
-          ls -la
-          sha256sum *.zip *.tar.gz > ../SHA256SUMS.txt 2>/dev/null || sha256sum * > ../SHA256SUMS.txt
-          cat ../SHA256SUMS.txt
       - name: create release
         uses: softprops/action-gh-release@v2
         with:
+          # Only the built archives are attached. GitHub shows a digest for each
+          # asset on the release page, so a separate checksum file adds nothing.
           files: |
             assets/*.zip
             assets/*.tar.gz
-            SHA256SUMS.txt
           generate_release_notes: true
           body: |
             ## 変更点
