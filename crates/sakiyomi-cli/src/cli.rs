@@ -260,18 +260,11 @@ pub enum BlocksCmd {
     List,
 }
 
-/// `bonus`: the two coin sources that sit beside missions.
+/// `bonus`: the daily login bonus, which is not an ad.
 #[derive(Debug, Subcommand)]
 pub enum BonusCmd {
-    /// Show what is available right now (GET /ads/reward).
-    Status(BonusStatusArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct BonusStatusArgs {
-    /// A play id from `wave play`, to ask about that run's video bonus.
-    #[arg(long, default_value = "")]
-    pub mg_play: String,
+    /// Show the daily login bonus state (GET /ads/reward).
+    Status,
 }
 
 /// `wave`: the endless-runner whose coins are paid out on a clear.

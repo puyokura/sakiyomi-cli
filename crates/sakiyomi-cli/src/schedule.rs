@@ -337,7 +337,11 @@ pub fn sum_today(ledger: &serde_json::Value, reason: &str) -> Vec<(i64, String)>
             continue;
         }
         let delta = e.get("delta").and_then(|d| d.as_i64()).unwrap_or(0);
-        out.push((delta, raw.to_string()));
+        // The day was matched in JST, so the time is reported in JST too. Mixing
+        // a JST total with UTC timestamps makes the list look like it belongs to
+        // the previous day.
+        let stamp = jst_time_of(raw).unwrap_or_else(|| raw.to_string());
+        out.push((delta, stamp));
     }
     out
 }
@@ -353,6 +357,23 @@ fn jst_today() -> String {
     let days = shifted.div_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// The JST wall-clock time of a UTC RFC 3339 timestamp, as `YYYY-MM-DD HH:MM`.
+fn jst_time_of(utc: &str) -> Option<String> {
+    let secs = unix_from_rfc(utc).ok()?;
+    let shifted = secs + 9 * 3600;
+    let days = shifted.div_euclid(86_400);
+    let rem = shifted.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60
+    ))
 }
 
 /// The JST date of a UTC RFC 3339 timestamp, as `YYYY-MM-DD`.
@@ -490,6 +511,20 @@ mod tests {
         });
         let second = s.new_id();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn utc_timestamps_are_reported_in_jst() {
+        // 16:49 UTC is 01:49 the next day in JST, which is the point: the day
+        // filter is JST, so the displayed time has to be too.
+        assert_eq!(
+            jst_time_of("2026-11-26T16:49:49.336Z").as_deref(),
+            Some("2026-11-27 01:49")
+        );
+        assert_eq!(
+            jst_time_of("2026-11-27T00:00:00.000Z").as_deref(),
+            Some("2026-11-27 09:00")
+        );
     }
 
     #[test]

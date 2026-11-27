@@ -764,7 +764,74 @@ fn state_action(
 /// available, which is why it doubles as the status view for `bonus`.
 fn cmd_bonus(c: cli::BonusCmd, settings: &Settings, g: &cli::Global) -> i32 {
     match c {
-        cli::BonusCmd::Status(a) => read(settings, g, |api| api.ads_reward("", "", &a.mg_play)),
+        cli::BonusCmd::Status => {
+            // `perform_with(.., false)` keeps the raw reply from being printed:
+            // the caller prints the stripped document once, at the end. Printing
+            // the original first would show the ad fields anyway.
+            let req = {
+                let api = Api::new(settings.app_version.clone());
+                api.ads_reward()
+            };
+            if g.dry_run {
+                let session = load_session(settings).unwrap_or_default();
+                let transport = make_transport(settings, g, &session);
+                print!(
+                    "{}",
+                    guard::describe(&req, transport.base(), session.token())
+                );
+                eprintln!("dry-run: nothing was sent");
+                return code::OK;
+            }
+            let (rc, body) = perform_with(settings, g, &req, false);
+            if rc != code::OK {
+                return rc;
+            }
+            let Some(mut body) = body else {
+                return rc;
+            };
+            strip_ad_fields(&mut body);
+            emit(g, &body);
+            rc
+        }
+    }
+}
+
+/// Drop the fields that only describe the rewarded-video offer.
+///
+/// The CLI does not show ads and cannot: the grant is gated on Google's SSV
+/// signature, which only Google can produce, so a count of how many videos were
+/// watched, the ad unit and the publisher-side user id are all noise here. The
+/// login and minigame bonuses happen to travel in the same reply, so the request
+/// stays; only the ad-shaped keys are removed.
+///
+/// Removed: `enabled` (whether the offer is on), `reward_coins`, `daily_limit`,
+/// `used_today`, `remaining`, `unit_id`, `user_ref`, `result` (the outcome of the
+/// last watched video), and `win_bonus` / `win_bonus_coins` (the same rewarded
+/// video offered for a just-settled win).
+pub(crate) fn strip_ad_fields(body: &mut serde_json::Value) {
+    const AD_KEYS: [&str; 12] = [
+        "enabled",
+        "reward_coins",
+        "daily_limit",
+        "used_today",
+        "remaining",
+        "unit_id",
+        "user_ref",
+        "result",
+        // The win bonus is the same rewarded video, offered when a settled
+        // position won: `win_bonus.event_id` is the event it applies to.
+        "win_bonus",
+        "win_bonus_coins",
+        // The minigame bonus is the video offered after a clear, so it is the
+        // same ad again rather than a minigame figure.
+        "minigame_bonus",
+        "minigame_bonus_coins",
+    ];
+    if let Some(obj) = body.as_object_mut() {
+        for key in AD_KEYS {
+            obj.remove(key);
+        }
+        obj.remove("ads");
     }
 }
 
@@ -788,7 +855,7 @@ fn cmd_wave_status(settings: &Settings, g: &cli::Global) -> i32 {
     // would put two JSON documents in front of the caller.
     let ads_req = {
         let api = Api::new(settings.app_version.clone());
-        api.ads_reward("", "", "")
+        api.ads_reward()
     };
     if g.dry_run {
         let session = load_session(settings).unwrap_or_default();
@@ -824,16 +891,12 @@ fn cmd_wave_status(settings: &Settings, g: &cli::Global) -> i32 {
         Vec::new()
     };
 
+    // The ad-shaped keys are dropped for the same reason `bonus status` drops
+    // them: the CLI cannot watch an ad, so reporting how many were watched only
+    // invites the reading that it could.
     let mut out = ads.clone();
+    strip_ad_fields(&mut out);
     if let Some(obj) = out.as_object_mut() {
-        obj.insert(
-            "ads".to_string(),
-            serde_json::json!({
-                "used_today": ads.get("used_today").cloned().unwrap_or(serde_json::Value::Null),
-                "daily_limit": ads.get("daily_limit").cloned().unwrap_or(serde_json::Value::Null),
-                "remaining": ads.get("remaining").cloned().unwrap_or(serde_json::Value::Null),
-            }),
-        );
         obj.insert(
             "minigame".to_string(),
             serde_json::json!({
@@ -1704,3 +1767,70 @@ fn cmd_gift_exchange(a: cli::GiftExchangeArgs, settings: &Settings, g: &cli::Glo
 }
 
 // ---- helpers --------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> serde_json::Value {
+        // The shape measured from GET /ads/reward on 2026-11-27.
+        serde_json::json!({
+            "enabled": true,
+            "reward_coins": 10,
+            "daily_limit": 5,
+            "used_today": 5,
+            "remaining": 0,
+            "unit_id": "ca-app-pub-example/example",
+            "user_ref": "u000",
+            "result": null,
+            "win_bonus_coins": 10,
+            "win_bonus": null,
+            "login_bonus_coins": 30,
+            "login_bonus": {"day": "2026-11-27", "available": true, "received": false},
+            "minigame_bonus_coins": 10,
+            "minigame_bonus": null
+        })
+    }
+
+    #[test]
+    fn the_ad_shaped_keys_are_removed() {
+        let mut body = sample();
+        strip_ad_fields(&mut body);
+        let obj = body.as_object().unwrap();
+        for gone in [
+            "enabled",
+            "reward_coins",
+            "daily_limit",
+            "used_today",
+            "remaining",
+            "unit_id",
+            "user_ref",
+            "result",
+            "win_bonus",
+            "win_bonus_coins",
+            "minigame_bonus",
+            "minigame_bonus_coins",
+        ] {
+            assert!(!obj.contains_key(gone), "{} should be gone", gone);
+        }
+    }
+
+    #[test]
+    fn the_login_bonus_survives() {
+        let mut body = sample();
+        strip_ad_fields(&mut body);
+        let obj = body.as_object().unwrap();
+        assert_eq!(obj["login_bonus_coins"], 30);
+        assert_eq!(obj["login_bonus"]["available"], true);
+        // The login bonus is the only non-ad bonus in this reply.
+        assert_eq!(obj.len(), 2, "only the login fields remain");
+    }
+
+    #[test]
+    fn stripping_a_non_object_is_a_no_op() {
+        // A reply that is not an object must not be turned into one.
+        let mut body = serde_json::json!([1, 2]);
+        strip_ad_fields(&mut body);
+        assert_eq!(body, serde_json::json!([1, 2]));
+    }
+}

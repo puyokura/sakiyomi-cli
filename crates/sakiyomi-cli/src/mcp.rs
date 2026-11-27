@@ -362,11 +362,8 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "bonus_status",
-            "What the ad and login bonuses offer right now (GET /ads/reward). Read-only.",
-            json!({"type":"object","properties":{
-                "mg_play": {"type":"string","default":"",
-                            "description":"A play id from wave_play, to report that round's video bonus."}
-            }}),
+            "The daily login bonus state (GET /ads/reward). Read-only.",
+            json!({"type":"object","properties":{}}),
         ),
         tool(
             "wave_play",
@@ -676,8 +673,22 @@ fn call_tool(
 
         // ---- bonus / minigame / quiz ----------------------------------------
         "bonus_status" => {
-            let mg_play = args.get("mg_play").and_then(|v| v.as_str()).unwrap_or("");
-            Ok(fetch(&transport, &api.ads_reward("", "", mg_play)))
+            // No `mg_play`: the minigame video bonus is an ad, so there is
+            // nothing here to ask about it.
+            let had_token = transport.has_token();
+            match transport.send(&api.ads_reward()) {
+                Ok(r) => match classify(r, had_token, false) {
+                    Ok(r) => {
+                        // Same removal as the CLI: the ad-shaped keys are not
+                        // something this client can act on.
+                        let mut body = r.body;
+                        crate::strip_ad_fields(&mut body);
+                        Ok(text_result(crate::output::to_json(&body)))
+                    }
+                    Err(e) => Ok(error_result(e.to_string())),
+                },
+                Err(e) => Ok(error_result(e.to_string())),
+            }
         }
         "wave_play" => {
             require_confirm(args)?;

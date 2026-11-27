@@ -248,16 +248,14 @@ sakiyomi claim <mission_id>              # ミッション報酬を受け取る
 
 ```
 {
-  "reward_coins": 10,          // 広告 1 本あたり
-  "daily_limit": 5,            // 1 日の本数
-  "used_today": 0,
-  "remaining": 5,
   "login_bonus_coins": 30,
-  "login_bonus": { "day": "2026-11-26", "available": true, "received": false },
-  "minigame_bonus_coins": 10,
-  "free_coins": 20             // ミニゲームのクリア分（wave play 側）
+  "login_bonus": { "day": "2026-11-27", "available": true, "received": false }
 }
 ```
+
+広告の本数・広告ユニット・視聴の成否は出さない。CLI は広告を出せないので、
+出しても読めない値になる。`wave status` は同じ内容に、ミニゲームの当日分を
+台帳から集計した `minigame` を足して返す。
 
 ### デイリーボーナス
 
@@ -272,7 +270,8 @@ sakiyomi claim 1 --yes
 
 ### 広告のコイン
 
-**ヘッドレスでは取れない。** 実装していないし、実装もできない。
+**CLI は広告を出さないし、出せない。** コマンドからも広告の状態を消してある
+（広告の本数・広告ユニット・視聴の成否は返さない）。理由は次のとおり。
 
 理由は `GET /ads/reward` の形にある。この経路は状態を返すだけで、付与は
 AdMob のサーバー側検証（SSV）コールバックが行う。アプリは

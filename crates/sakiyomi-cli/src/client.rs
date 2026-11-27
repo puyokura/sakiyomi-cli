@@ -405,12 +405,12 @@ impl Api {
     /// `GET /ads/reward?device=android&nonce=&win_event=&mg_play=`
     /// (bundle 455655-455762). The app maps a 404 to a default "ads unavailable"
     /// state; that mapping belongs to the caller, not to the builder.
-    pub fn ads_reward(&self, nonce: &str, win_event: &str, mg_play: &str) -> WireRequest {
-        WireRequest::get("/ads/reward")
-            .query("device", "android")
-            .query("nonce", nonce)
-            .query("win_event", win_event)
-            .query("mg_play", mg_play)
+    /// Only `device=android` is sent. The other three parameters (`nonce`,
+    /// `win_event`, `mg_play`) exist to ask about a video that was just watched,
+    /// and this client never watches one, so they are omitted rather than sent
+    /// empty. Measured: the reply is identical with them absent.
+    pub fn ads_reward(&self) -> WireRequest {
+        WireRequest::get("/ads/reward").query("device", "android")
     }
 
     /// `POST /minigame/wave/start {platform, app_version, rules_version}`

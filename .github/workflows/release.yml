@@ -125,6 +125,15 @@ jobs:
           generate_release_notes: true
           body: |
             ## 変更点
+            - **CLI から広告の状態を消しました。** `bonus status` と `wave status` は
+              広告の本数（`used_today` / `daily_limit` / `remaining`）、広告ユニット、
+              視聴の成否、勝利後の動画ボーナス、ミニゲーム後の動画ボーナスを
+              返さなくなりました。CLI は広告を出せないので、出しても読めない値になります。
+              残るのはログインボーナスと、ミニゲームの当日分（台帳から集計）です。
+            - `bonus status` の `--mg_play` を削除しました。動画ボーナスを問い合わせる
+              ためだけの引数でした。MCP の `bonus_status` からも外しています。
+            - `wave status` の `minigame.entries` を JST で返すようにしました。集計は
+              JST の日付で行っていたのに、表示は UTC のままで、前日の出来事に見えていました。
             - `buy` と `schedule` の `--stake` の説明が「ポイント」になっていましたが、
               実測ではサーバーは **コイン** を引きます（`coins` が減り `points` は動かない）。
               説明を訂正し、`--stake` の許容範囲（10〜100,000）も送信前に検査します。
@@ -154,7 +163,8 @@ jobs:
               `schedule add --at ... --event ... --option ... --stake ...` で予約し、
               `schedule run` が常駐して時刻が来たら買います。予約はファイルに残り、
               落ちても `in_flight` の印が残るので二重購入を避けられます。
-             - **`wave status` の分割**: 広告の本数とミニゲームの当日受取を別項目で返します。
+             - **広告を扱わないことを明示**: `bonus status` はログインボーナスだけを返します。
+            - **`wave status`**: ログインボーナスに加えて、ミニゲームの当日分を台帳から集計して返します。
              - **`quiz list`**: 自分のクイズの一覧と審査状況（pending / approved / rejected）、
               運営の審査コメント、採用ボーナスを表示します。`--status` で絞り込めます。
             - **`events list --stake`**: 一覧のまま、各選択肢の買付確率と取得予定 shares を比較できます。
