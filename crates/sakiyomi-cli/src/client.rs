@@ -266,6 +266,16 @@ impl Api {
 
     /// `GET /updown/{id}`. `live` selects the variant that appends `?live=1`
     /// (bundle 498490-498495).
+    /// Subcategory → market symbol, as the app has it (bundle 753033:
+    /// `{'ビットコイン': 'btc'}`). Kept here rather than in the CLI so the mapping
+    /// has one home, and an unknown subcategory is refused instead of guessed.
+    pub fn updown_symbol_for(subcategory: &str) -> Option<&'static str> {
+        match subcategory {
+            "ビットコイン" => Some("btc"),
+            _ => None,
+        }
+    }
+
     pub fn updown(&self, id: &str, live: bool) -> WireRequest {
         let path = format!("/updown/{}", encode_path_segment(id));
         if live {

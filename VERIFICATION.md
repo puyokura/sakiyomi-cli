@@ -30,7 +30,7 @@
 | `blocks list` | 401 → exit 6 | 認証必須 |
 | `me` | 401 → exit 6 | 認証必須 |
 | `users show <unknown>` | 404 → exit 1 | `{"error":"ユーザーが見つかりません"}` |
-| `events updown <id>` | 404 → exit 1 | **引数が未検証**（下記 §4） |
+| `events updown <sym>` | 200（`btc`）。イベント ID を渡すと 404 | 引数はシンボル（下記 §4）。ID は単体取得で変換する |
 
 ## 2. 実測で確定したサーバー挙動
 
@@ -164,10 +164,27 @@ exit=0
   CLI 単体で認可コードを受け取る経路が存在しない。トークンはアプリ側で確立したものを
   `auth import-token` で取り込む。取り込み時に `GET /me` で検証し、401 なら保存しない
   （偽トークンで exit 6・ファイル未生成を実測）。
-- **`/updown/{X}` の引数**。バンドルの唯一の呼び出しは `useUpDownChart(r15, ...)` で、
-  `r15` は `source === 'updown' ? SLOT18[subcategory] : null`（749599-749622）から来る。
-  SLOT18 は期間セレクタの配列（744613-744622）であり、イベント ID ではない。
-  実測では 44775 / 44909 / 6663 / 25142 / 1 のすべてが 404。**引数の正体は不明。**
+- **`/updown/{X}` の引数は市場シンボル（実測で確定、2026-11-28）**。`X` はイベント ID
+  ではなく、サブカテゴリから引くシンボル。バンドルの表は `{'ビットコイン': 'btc'}`
+  （753033）で、`upDownSym`（753035-753059）が
+  `source === 'updown' ? TABLE[subcategory] : null` として解決する。呼び出し側は
+  `useUpDownChart(sym)`（queryKey `updown` / `sym` / `full`）と `useUpDownLive(sym)`
+  （`updown` / `sym` / `live`、1 秒間隔）。実測: `GET /updown/btc` は 200、
+  `/updown/90241`（イベント ID）は 404、`/updown/<サブカテゴリ名>` も 404。
+  イベント ID を渡すと 404 になるのは当然で、「イベントが無い」ではない。
+- **`GET /updown/{sym}` の応答（実測）**。`sym` / `label` / `unit` / `digits` /
+  `server_now` / `price` / `history` / `rounds` / `live` / `src` を返す。`?live=1` を
+  付けると `rounds`（最大 12 件、`id` `status` `closes_at` `participants` `baseline`
+  `baseline_at` `resolve_at` `final` `final_at` `result` `canceled` を含む）と現在価格が
+  入り、付けないと価格履歴だけになる。`history` は `[ms, price]` の配列で、`?live=1`
+  では約 20 秒分しか返らない（120 秒級の判定には足りないので自前で蓄積が要る）。
+  `src` は判定に使う取引所で、実測では `coinbase`。
+- **updown ラウンドは `GET /events/{id}` で取れる（実測）**。`category=updown`、
+  `subcategory=ビットコイン`、`source=updown`、options は「上がる」「下がる」の 2 択で
+  `prob` と `weight` を含む。**一括取得 `GET /events?ids=` は空配列を返す**ので、
+  ラウンドの板は単体取得で読む。`events show` と `buy --dry-run` の見積もりはどちらも
+  単体取得を使うため、ラウンドでも動く（実測: 開いたラウンドで `buy_prob` と `shares` が返る）。
+
 - **サーバー側の認可**。他人の position を sell できるか等は未検証。
 - **レート制限**。
 - **`/minigame/wave/*` の `rules_version`** の実値は定数モジュールから復元できなかった。実測では 1 と 2 が通り、3 は 409 で拒否される。既定は 2。
@@ -180,4 +197,4 @@ exit=0
 | 素の通信断 | 生のエラーを上位へ流す | `TransportError::Network` に分類 | CLI では「送信されていない」と「結果不明」を区別する必要がある |
 | タイムアウト | `ApiError(0, ...)` | phase 付き。connect/resolve は「未送信」、それ以外は「結果不明」 | 金銭操作の再試行可否が変わる |
 | `?trial_ui=1` on `/events/{id}` | 付ける | 付けない | 実測で 404 |
-| `/updown` | サブカテゴリ表引き | イベント ID を受ける | 引数が不明なため。404 時に「引数が未検証」と明示する |
+| `/updown` | サブカテゴリ→シンボル表引き | シンボルを受ける。数値のイベント ID は `GET /events/{id}` で subcategory を引いて同じ表で変換する | 手元にあるのはラウンド ID であることが多い。未知のサブカテゴリは推測せず exit 2 で拒否する |

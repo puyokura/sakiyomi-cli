@@ -500,6 +500,75 @@ where
     rc
 }
 
+/// `events updown` — the up/down chart and rounds for one market symbol.
+///
+/// The path segment is a symbol (`btc`), not an event id: the app resolves it
+/// from the subcategory through `{'ビットコイン': 'btc'}` (bundle 753033) and
+/// never sends an id. An id is still accepted, because the round the caller just
+/// looked at is usually what they have in hand; it is converted through that same
+/// table after one `GET /events/{id}`. An unknown subcategory is refused rather
+/// than turned into a guessed symbol.
+fn cmd_events_updown(a: cli::EventsUpdownArgs, settings: &Settings, g: &cli::Global) -> i32 {
+    let sym = match resolve_updown_sym(&a.sym, settings, g) {
+        Ok(s) => s,
+        Err(rc) => return rc,
+    };
+    if sym != a.sym {
+        eprintln!("note: {} is an event id; its symbol is {}", a.sym, sym);
+    }
+    read(settings, g, |api| api.updown(&sym, a.live))
+}
+
+/// Turn whatever the caller passed into a symbol.
+///
+/// A non-numeric argument is taken as the symbol itself and returned unchanged;
+/// the server decides whether it exists. A numeric one is looked up as an event
+/// id, and its subcategory is mapped. Failure here is a usage error, because
+/// nothing was sent and the caller can fix the argument.
+fn resolve_updown_sym(arg: &str, settings: &Settings, g: &cli::Global) -> Result<String, i32> {
+    if !arg.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(arg.to_string());
+    }
+    let req = {
+        let api = Api::new(settings.app_version.clone());
+        api.event(arg)
+    };
+    if g.dry_run {
+        let session = load_session(settings).unwrap_or_default();
+        let transport = make_transport(settings, g, &session);
+        print!(
+            "{}",
+            guard::describe(&req, transport.base(), session.token())
+        );
+        eprintln!("dry-run: nothing was sent");
+        return Err(code::OK);
+    }
+    // The lookup body is not the answer: it is printed nowhere, so the caller
+    // sees only the /updown reply.
+    let (rc, body) = perform_with(settings, g, &req, false);
+    if rc != code::OK {
+        return Err(rc);
+    }
+    let Some(body) = body else {
+        return Err(code::FAILED);
+    };
+    let subcategory = body
+        .get("event")
+        .and_then(|e| e.get("subcategory"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    match Api::updown_symbol_for(subcategory) {
+        Some(sym) => Ok(sym.to_string()),
+        None => {
+            eprintln!(
+                "error: event {} has subcategory {:?}, which has no known market symbol; \
+                 pass the symbol instead (e.g. `events updown btc`)",
+                arg, subcategory
+            );
+            Err(code::USAGE)
+        }
+    }
+}
 fn cmd_events(c: cli::EventsCmd, settings: &Settings, g: &cli::Global) -> i32 {
     match c {
         cli::EventsCmd::List(a) => cmd_events_list(a, settings, g),
@@ -528,22 +597,7 @@ fn cmd_events(c: cli::EventsCmd, settings: &Settings, g: &cli::Global) -> i32 {
         cli::EventsCmd::Live => read(settings, g, |api| api.live_board()),
         cli::EventsCmd::Categories(a) => read(settings, g, |api| api.categories(a.trial)),
         cli::EventsCmd::Subcategories(a) => read(settings, g, |api| api.subcategories(&a.category)),
-        cli::EventsCmd::Updown(a) => {
-            // The app does not call this with an event id: the only call site is
-            // `useUpDownChart(r15, ...)` where r15 comes from
-            // `source === 'updown' ? TABLE[subcategory] : null` (bundle
-            // 749599-749622). So the correct argument is unverified, and a 404
-            // must not be read as "that event does not exist".
-            let (rc, _) = read_body(settings, g, |api| api.updown(&a.id, a.live));
-            if rc == code::FAILED {
-                eprintln!(
-                    "note: the bundle never calls /updown with an event id, so a 404 here \
-                     means the argument is unverified — not that the event is missing.\n\
-                     See analysis/api-contracts.md §2."
-                );
-            }
-            rc
-        }
+        cli::EventsCmd::Updown(a) => cmd_events_updown(a, settings, g),
     }
 }
 
@@ -1894,6 +1948,14 @@ mod tests {
         assert_eq!(strip_video_from_report(raw), raw);
         let broken = "ok: {not json";
         assert_eq!(strip_video_from_report(broken), broken);
+    }
+
+    #[test]
+    fn the_symbol_table_matches_the_app() {
+        // bundle 753033: {'ビットコイン': 'btc'}.
+        assert_eq!(Api::updown_symbol_for("ビットコイン"), Some("btc"));
+        assert_eq!(Api::updown_symbol_for("プロ野球"), None);
+        assert_eq!(Api::updown_symbol_for(""), None);
     }
 
     #[test]

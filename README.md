@@ -202,6 +202,7 @@ sakiyomi events history 44909 --period 1d         # 直近 1 日
 sakiyomi events live                              # ライブボード
 sakiyomi events categories                        # カテゴリ 13 件
 sakiyomi events subcategories soccer              # サブカテゴリ
+sakiyomi events updown btc --live                 # updown（BTC 5分）のラウンドと現在価格
 
 sakiyomi positions list                           # 自分のポジション（要ログイン）
 sakiyomi positions list --tab result              # タブ指定（active / result）
@@ -270,6 +271,32 @@ sakiyomi missions list | grep -A1 '"kind": "login"'   # claimable を見る
 sakiyomi claim 1 --yes
 ```
 
+### updown（ビットコイン5分）ゲーム
+
+`events updown` の引数は**イベント ID ではなく市場シンボル**です（実測で確定）。
+バンドルはサブカテゴリから `{'ビットコイン': 'btc'}` で引きます（753033）。
+イベント ID を渡すと、単体取得で subcategory を調べて同じ表で変換します。
+
+```bash
+sakiyomi events updown btc --live    # ラウンド一覧・現在価格・server_now
+sakiyomi events updown btc           # 価格履歴（約30分、5秒間隔）
+```
+
+`--live` を付けると `rounds` が返ります（最大 12 件、`id` `status` `closes_at`
+`participants` `baseline` を含む）。付けないと価格履歴だけです。`history` は
+`[ms, price]` の配列で、`--live` では約 20 秒分しか返らないので、長い期間の
+判定をしたいときは自分で蓄積してください。
+
+ラウンドの板は `events show <round_id>` で読めます（`category=updown`、options は
+「上がる」「下がる」）。ただし**一括取得 `GET /events?ids=` はラウンドを返さない**
+（空配列）ので、`events list --ids` では取れません。
+
+```bash
+sakiyomi events updown btc --live | jq '.rounds[] | select(.status=="open") | .id'
+# 出た ID で板を見て、そのまま買える
+sakiyomi events show 97770
+sakiyomi buy --event 97770 --option 119377 --stake 10 --dry-run
+```
 ### 広告のコイン
 
 **CLI は広告を出さないし、出せない。** コマンドからも広告の状態を消してある

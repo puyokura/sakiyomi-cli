@@ -440,9 +440,12 @@ pub struct EventsSubcategoriesArgs {
 
 #[derive(Debug, Args)]
 pub struct EventsUpdownArgs {
-    /// Event id.
-    pub id: String,
-    /// Request the live variant (`?live=1`).
+    /// Market symbol, e.g. `btc`. The app looks this up from the subcategory
+    /// (bundle 753033 maps `ビットコイン` to `btc`); it never sends an event id.
+    /// An event id is also accepted and converted through that same table.
+    pub sym: String,
+    /// Request the live variant (`?live=1`), which adds the round list and
+    /// `server_now` alongside the price history.
     #[arg(long)]
     pub live: bool,
 }
